@@ -1,0 +1,61 @@
+From 140793fd5e63876667963549e3af88873c8bff8e Mon Sep 17 00:00:00 2001
+From: aryamali <quic_aryamali@quicinc.com>
+Date: Wed, 16 Aug 2023 17:21:51 -0700
+Subject: [PATCH 1/1] netifd: Add route MTU option for IPv4 and IPv6 Backhaul
+
+Adding a route MTU option for IPv4 and IPv6 Backhaul
+route configuration
+
+Signed-off-by: aryamali <quic_aryamali@quicinc.com>
+---
+ scripts/netifd-proto.sh | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/netifd-proto.sh b/scripts/netifd-proto.sh
+index 87d337d..0f2e0f1 100644
+--- a/scripts/netifd-proto.sh
++++ b/scripts/netifd-proto.sh
+@@ -158,8 +158,9 @@ proto_add_ipv4_route() {
+ 	local gw="$3"
+ 	local source="$4"
+ 	local metric="$5"
++	local mtu="$6"
+ 
+-	append PROTO_ROUTE "$target/$mask/$gw/$metric///$source"
++	append PROTO_ROUTE "$target/$mask/$gw/$metric///$source/$mtu"
+ }
+ 
+ proto_add_ipv6_route() {
+@@ -170,8 +171,9 @@ proto_add_ipv6_route() {
+ 	local valid="$5"
+ 	local source="$6"
+ 	local table="$7"
++	local mtu="$8"
+ 
+-	append PROTO_ROUTE6 "$target/$mask/$gw/$metric/$valid/$table/$source"
++	append PROTO_ROUTE6 "$target/$mask/$gw/$metric/$valid/$table/$source/$mtu"
+ }
+ 
+ proto_add_ipv6_prefix() {
+@@ -288,7 +290,9 @@ _proto_push_route() {
+ 	str="${str#*/}"
+ 	local table="${str%%/*}"
+ 	str="${str#*/}"
+-	local source="${str}"
++	local source="${str%%/*}"
++	str="${str#*/}"
++	local mtu="${str}"
+ 
+ 	json_add_object ""
+ 	json_add_string target "$target"
+@@ -298,6 +302,7 @@ _proto_push_route() {
+ 	[ -n "$valid" ] && json_add_int valid "$valid"
+ 	[ -n "$source" ] && json_add_string source "$source"
+ 	[ -n "$table" ] && json_add_string table "$table"
++	[ -n "$mtu" ] && json_add_int mtu "$mtu"
+ 	json_close_object
+ }
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,28 @@
+From da190f8256989300546ac7c0326ec3190e737881 Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Date: Fri, 4 Oct 2024 16:12:42 +0530
+Subject: [PATCH] 0001-debug_log-2
+
+Signed-off by: Dheeraj Kumar <quic_dhekum@quicinc.com>
+---
+ netifd.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/netifd.h b/netifd.h
+index a462abd..e6ea82b 100644
+--- a/netifd.h
++++ b/netifd.h
+@@ -79,8 +79,8 @@ enum {
+ 		} \
+ 	} while (0)
+ #else
+-#define DPRINTF(format, ...) no_debug(0, format, ## __VA_ARGS__)
+-#define D(level, format, ...) no_debug(DEBUG_ ## level, format, ## __VA_ARGS__)
++#define DPRINTF(format, ...) netifd_log_message(0, format, ## __VA_ARGS__)
++#define D(level, format, ...) netifd_log_message(DEBUG_ ## level, format, ## __VA_ARGS__)
+ #endif
+ 
+ #define LOG_BUF_SIZE	256
+-- 
+2.17.1
+
