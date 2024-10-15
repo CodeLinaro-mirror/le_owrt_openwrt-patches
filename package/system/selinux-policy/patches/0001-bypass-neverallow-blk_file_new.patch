@@ -1,0 +1,33 @@
+From b9040dd889a2bb7a0b6079a96cc9c4cdae7ba0f5 Mon Sep 17 00:00:00 2001
+From: Ravi Kumar Siddojigari <quic_rsiddoji@quicinc.com>
+Date: Wed, 15 Mar 2023 12:01:34 +0530
+Subject: [PATCH] owrt-qti-sepolicy: updated rmt-storage sepolicy for blk_file.
+
+Upstream neverallow was blocking blk_file read/write for
+rmt_storage device where only root services are allowed to
+do so . This changes is removing this restriction and going
+fwd we will have a better way to get this done.
+
+Signed-off-by: Ravi Kumar Siddojigari <quic_rsiddoji@quicinc.com>
+---
+--- a/src/dev/stordev.cil
++++ b/src/dev/stordev.cil
+@@ -465,7 +465,7 @@
+                    (not
+                     subj_typeattr))
+ 
+-                  (neverallow not_subj_typeattr obj_typeattr (blk_file (read)))
++;                  (neverallow not_subj_typeattr obj_typeattr (blk_file (read)))
+                   (neverallow not_subj_typeattr obj_typeattr
+                               (chr_file (read))))
+ 
+@@ -509,7 +509,7 @@
+                    (not
+                     subj_typeattr))
+ 
+-                  (neverallow not_subj_typeattr obj_typeattr
+-                              (blk_file (append write)))
++ ;;                 (neverallow not_subj_typeattr obj_typeattr
++ ;;                             (blk_file (append write)))
+                   (neverallow not_subj_typeattr obj_typeattr
+                               (chr_file (append write))))))
