@@ -1,0 +1,114 @@
+From 5879700577e1c63ae14534e57377b0730ce1a6e2 Mon Sep 17 00:00:00 2001
+From: Ravi Paluri <quic_rpaluri@quicinc.com>
+Date: Wed, 11 Jan 2023 17:17:03 +0530
+Subject: [PATCH] mangle_enable-02
+Signed-off-by: Ravi Paluri<quic_rpaluri@quicinc.com>
+---
+ options.h |  1 +
+ rules.c   | 40 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 33 insertions(+), 8 deletions(-)
+
+diff --git a/options.h b/options.h
+index e3b0ef8..cf425c8 100644
+--- a/options.h
++++ b/options.h
+@@ -362,6 +362,7 @@ struct fw3_rule
+ 	struct list_head list;
+ 
+ 	bool enabled;
++	bool mangle;
+ 	const char *name;
+ 
+ 	enum fw3_family family;
+diff --git a/rules.c b/rules.c
+index a6d9d31..724a097 100644
+--- a/rules.c
++++ b/rules.c
+@@ -66,7 +66,7 @@ const struct fw3_option fw3_rule_opts[] = {
+ 	FW3_OPT("set_dscp",            dscp,      rule,     set_dscp),
+ 
+ 	FW3_OPT("target",              target,    rule,     target),
+-
++        FW3_OPT("mangle",              bool,      rule,     mangle),
+ 	{ }
+ };
+ 
+@@ -295,13 +295,26 @@ fw3_load_rules(struct fw3_state *state, struct uci_package *p,
+ 
+ 
+ static void
+-append_chain(struct fw3_ipt_rule *r, struct fw3_rule *rule)
++append_chain(struct fw3_ipt_rule *r, struct fw3_rule *rule, struct fw3_ipt_handle *handle)
+ {
+ 	char chain[32];
+-
+ 	snprintf(chain, sizeof(chain), "OUTPUT");
+-
+-	if (rule->target == FW3_FLAG_NOTRACK)
++    
++    if( rule->mangle && (rule->target == FW3_FLAG_ACCEPT || rule->target == FW3_FLAG_DROP || rule->target == FW3_FLAG_REJECT ) && (handle->table == FW3_TABLE_MANGLE))
++	{
++	    if ((rule->_dest && rule->_src) ||
++		    (rule->dest.any && rule->src.any))
++			snprintf(chain, sizeof(chain), "FORWARD");
++		else if (rule->src.any && rule->_dest)
++			snprintf(chain, sizeof(chain), "POSTROUTING");
++		else if (rule->dest.any && rule->_src)
++			snprintf(chain, sizeof(chain), "PREROUTING");
++		else if (!rule->dest.set && rule->src.set)
++			snprintf(chain, sizeof(chain), "INPUT");
++		else /* if (!rule->src.set) */
++	snprintf(chain, sizeof(chain), "OUTPUT");
++	}
++	else if (rule->target == FW3_FLAG_NOTRACK)
+ 	{
+ 		snprintf(chain, sizeof(chain), "zone_%s_notrack", rule->src.name);
+ 	}
+@@ -324,7 +337,10 @@ append_chain(struct fw3_ipt_rule *r, struct fw3_rule *rule)
+ 			snprintf(chain, sizeof(chain), "OUTPUT");
+ 	}
+ 	else
+-	{
++	{   if(rule->mangle)
++            {
++	      return;
++	    }
+ 		if (rule->src.set)
+ 		{
+ 			if (!rule->src.any)
+@@ -501,6 +517,14 @@ print_rule(struct fw3_ipt_handle *handle, struct fw3_state *state,
+ 			odevices = &rule->_dest->devices;
+ 	}
+ 
++	if (rule->mangle && (rule->target == FW3_FLAG_ACCEPT || rule->target == FW3_FLAG_DROP || rule->target == FW3_FLAG_REJECT ) && (handle->table == FW3_TABLE_MANGLE))
++	{
++		if (rule->_src)
++			idevices = &rule->_src->devices;
++		if (rule->_dest)
++			odevices = &rule->_dest->devices;
++	}
++
+ 	fw3_foreach(idev, idevices)
+ 	fw3_foreach(odev, odevices)
+ 	{
+@@ -518,7 +542,7 @@ print_rule(struct fw3_ipt_handle *handle, struct fw3_state *state,
+ 		set_target(r, rule);
+ 		fw3_ipt_rule_extra(r, rule->extra);
+ 		set_comment(r, rule->name, num);
+-		append_chain(r, rule);
++		append_chain(r, rule, handle);
+ 	}
+ }
+ 
+@@ -549,7 +573,7 @@ expand_rule(struct fw3_ipt_handle *handle, struct fw3_state *state,
+ 	    (rule->target == FW3_FLAG_MARK && handle->table != FW3_TABLE_MANGLE) ||
+ 	    (rule->target == FW3_FLAG_CONNMARK && handle->table != FW3_TABLE_MANGLE) ||
+ 	    (rule->target == FW3_FLAG_DSCP && handle->table != FW3_TABLE_MANGLE) ||
+-		(rule->target < FW3_FLAG_NOTRACK && handle->table != FW3_TABLE_FILTER))
++		(rule->target < FW3_FLAG_NOTRACK && ( (handle->table != FW3_TABLE_FILTER) && (handle->table != FW3_TABLE_MANGLE) )) )
+ 		return;
+ 
+ 	if (rule->name)
+-- 
+2.17.1
+

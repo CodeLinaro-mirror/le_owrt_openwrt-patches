@@ -1,0 +1,138 @@
+From 2f4ac5acb447faa8498426160b6b912bdcc4aef9 Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar<quic_dhekum@quicinc.com>
+Date: Wed, 14 Sep 2022 16:48:08 +0530
+Subject: [PATCH] firewall-02
+Signed-off-by: Dheeraj Kumar<quic_dhekum@quicinc.com>
+---
+ options.c |  1 +
+ options.h | 23 ++++++++++++-----------
+ rules.c   | 25 +++++++++++++++++++++----
+ 3 files changed, 34 insertions(+), 15 deletions(-)
+
+diff --git a/options.c b/options.c
+index 6131786..c682af3 100644
+--- a/options.c
++++ b/options.c
+@@ -78,6 +78,7 @@ const char *fw3_flag_names[__FW3_FLAG_MAX] = {
+ 	"HELPER",
+ 	"MARK",
+ 	"DSCP",
++	"CONNMARK",
+ 	"DNAT",
+ 	"SNAT",
+ 	"MASQUERADE",
+diff --git a/options.h b/options.h
+index e20c89b..e3b0ef8 100644
+--- a/options.h
++++ b/options.h
+@@ -74,17 +74,18 @@ enum fw3_flag
+ 	FW3_FLAG_HELPER        = 10,
+ 	FW3_FLAG_MARK          = 11,
+ 	FW3_FLAG_DSCP          = 12,
+-	FW3_FLAG_DNAT          = 13,
+-	FW3_FLAG_SNAT          = 14,
+-	FW3_FLAG_MASQUERADE    = 15,
+-	FW3_FLAG_SRC_ACCEPT    = 16,
+-	FW3_FLAG_SRC_REJECT    = 17,
+-	FW3_FLAG_SRC_DROP      = 18,
+-	FW3_FLAG_CUSTOM_CHAINS = 19,
+-	FW3_FLAG_SYN_FLOOD     = 20,
+-	FW3_FLAG_MTU_FIX       = 21,
+-	FW3_FLAG_DROP_INVALID  = 22,
+-	FW3_FLAG_HOTPLUG       = 23,
++	FW3_FLAG_CONNMARK      = 13,
++	FW3_FLAG_DNAT          = 14,
++	FW3_FLAG_SNAT          = 15,
++	FW3_FLAG_MASQUERADE    = 16,
++	FW3_FLAG_SRC_ACCEPT    = 17,
++	FW3_FLAG_SRC_REJECT    = 18,
++	FW3_FLAG_SRC_DROP      = 19,
++	FW3_FLAG_CUSTOM_CHAINS = 20,
++	FW3_FLAG_SYN_FLOOD     = 21,
++	FW3_FLAG_MTU_FIX       = 22,
++	FW3_FLAG_DROP_INVALID  = 23,
++	FW3_FLAG_HOTPLUG       = 24,
+ 
+ 	__FW3_FLAG_MAX
+ };
+diff --git a/rules.c b/rules.c
+index d506a96..a6d9d31 100644
+--- a/rules.c
++++ b/rules.c
+@@ -163,6 +163,13 @@ check_rule(struct fw3_state *state, struct fw3_rule *r, struct uci_element *e)
+ 		return false;
+ 	}
+ 
++    if (!r->set_mark.set && !r->set_xmark.set && r->target == FW3_FLAG_CONNMARK)
++	{
++		warn_section("rule", r, e, "is set to target CONNMARK but specifies neither "
++		                           "'set_mark' nor 'set_xmark' option");
++		return false;
++	}
++
+ 	if (!r->set_dscp.set && r->target == FW3_FLAG_DSCP)
+ 	{
+ 		warn_section("rule", r, e, "is set to target DSCP but specifies no "
+@@ -207,7 +214,7 @@ check_rule(struct fw3_state *state, struct fw3_rule *r, struct uci_element *e)
+ 		warn_section("rule", r, e, "has no target specified, defaulting to REJECT");
+ 		r->target = FW3_FLAG_REJECT;
+ 	}
+-	else if (r->target > FW3_FLAG_DSCP)
++	else if (r->target > FW3_FLAG_CONNMARK)
+ 	{
+ 		warn_section("rule", r, e, "has invalid target specified, defaulting to REJECT");
+ 		r->target = FW3_FLAG_REJECT;
+@@ -302,7 +309,7 @@ append_chain(struct fw3_ipt_rule *r, struct fw3_rule *rule)
+ 	{
+ 		snprintf(chain, sizeof(chain), "zone_%s_helper", rule->src.name);
+ 	}
+-	else if (rule->target == FW3_FLAG_MARK || rule->target == FW3_FLAG_DSCP)
++	else if (rule->target == FW3_FLAG_MARK || rule->target == FW3_FLAG_DSCP || rule->target == FW3_FLAG_CONNMARK)
+ 	{
+ 		if ((rule->_dest && rule->_src) ||
+ 		    (rule->dest.any && rule->src.any))
+@@ -367,14 +374,23 @@ static void set_target(struct fw3_ipt_rule *r, struct fw3_rule *rule)
+ 		fw3_ipt_rule_target(r, "MARK");
+ 		fw3_ipt_rule_addarg(r, false, name, buf);
+ 		return;
+-
++   
+ 	case FW3_FLAG_DSCP:
+ 		snprintf(buf, sizeof(buf), "0x%x", rule->set_dscp.dscp);
+ 
+ 		fw3_ipt_rule_target(r, "DSCP");
+ 		fw3_ipt_rule_addarg(r, false, "--set-dscp", buf);
+ 		return;
++		
++   case FW3_FLAG_CONNMARK:
++		name = rule->set_mark.set ? "--set-mark" : "--set-xmark";
++		mark = rule->set_mark.set ? &rule->set_mark : &rule->set_xmark;
++		snprintf(buf, sizeof(buf), "0x%x/0x%x", mark->mark, mark->mask);
+ 
++		fw3_ipt_rule_target(r, "CONNMARK");
++		fw3_ipt_rule_addarg(r, false, name, buf);
++		return;
++		
+ 	case FW3_FLAG_NOTRACK:
+ 		fw3_ipt_rule_target(r, "CT");
+ 		fw3_ipt_rule_addarg(r, false, "--notrack", NULL);
+@@ -477,7 +493,7 @@ print_rule(struct fw3_ipt_handle *handle, struct fw3_state *state,
+ 		return;
+ 	}
+ 
+-	if (rule->target == FW3_FLAG_DSCP || rule->target == FW3_FLAG_MARK)
++	if (rule->target == FW3_FLAG_DSCP || rule->target == FW3_FLAG_MARK || rule->target == FW3_FLAG_CONNMARK)
+ 	{
+ 		if (rule->_src)
+ 			idevices = &rule->_src->devices;
+@@ -531,6 +547,7 @@ expand_rule(struct fw3_ipt_handle *handle, struct fw3_state *state,
+ 	if ((rule->target == FW3_FLAG_NOTRACK && handle->table != FW3_TABLE_RAW) ||
+ 	    (rule->target == FW3_FLAG_HELPER && handle->table != FW3_TABLE_RAW)  ||
+ 	    (rule->target == FW3_FLAG_MARK && handle->table != FW3_TABLE_MANGLE) ||
++	    (rule->target == FW3_FLAG_CONNMARK && handle->table != FW3_TABLE_MANGLE) ||
+ 	    (rule->target == FW3_FLAG_DSCP && handle->table != FW3_TABLE_MANGLE) ||
+ 		(rule->target < FW3_FLAG_NOTRACK && handle->table != FW3_TABLE_FILTER))
+ 		return;
+-- 
+2.17.1
+
