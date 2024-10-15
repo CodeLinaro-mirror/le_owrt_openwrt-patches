@@ -1,0 +1,44 @@
+From 9d9413668dce1ae61d483a33390097f845fba8d2 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Fri, 15 Sep 2023 14:00:52 +0800
+Subject: [PATCH] dnsmasq: fix issue not able to write 2nd client's host name
+ in same host
+
+scenario:
+  from same PC host, there are two clients one is usb one is wlan,
+  they use same host name.
+  if one of them is marked as LEASE_AUTH_NAME already(happen only if is marked),
+  then another client can't write hostname in the lease record.
+  this result issue that can't get hostname of the dhcp client
+---
+ src/lease.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/lease.c b/src/lease.c
+index 1a9f1c6..9af1369 100644
+--- a/src/lease.c
++++ b/src/lease.c
+@@ -950,6 +950,7 @@ void lease_set_hostname(struct dhcp_lease *lease, const char *name, int auth, ch
+ {
+   struct dhcp_lease *lease_tmp;
+   char *new_name = NULL, *new_fqdn = NULL;
++  char printbuf[1000];
+ 
+   if (config_domain && (!domain || !hostname_isequal(domain, config_domain)))
+     my_syslog(MS_DHCP | LOG_WARNING, _("Ignoring domain %s for DHCP host name %s"), config_domain, name);
+@@ -1013,6 +1014,12 @@ void lease_set_hostname(struct dhcp_lease *lease, const char *name, int auth, ch
+ 	  else if (lease_tmp->flags & (LEASE_TA | LEASE_NA))
+ 	    continue;
+ 		   
++	  if(memcmp(lease_tmp->hwaddr, lease->hwaddr, lease_tmp->hwaddr_len) != 0) {
++	    my_syslog(MS_DHCP | LOG_WARNING, "ignore set hostname for hwaddr=%s since different hwaddr",
++	            print_mac(printbuf, lease_tmp->hwaddr, lease_tmp->hwaddr_len));
++	    continue;
++	  }
++
+ 	  if ((lease_tmp->flags & LEASE_AUTH_NAME) && !auth)
+ 	    {
+ 	      free(new_name);
+-- 
+2.40.0.windows.1
+
