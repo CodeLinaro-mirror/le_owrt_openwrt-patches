@@ -1,0 +1,125 @@
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 5dcb6dfd5d4b4031ae8e1171710b4bfec2f1a7cd Mon Sep 17 00:00:00 2001
+From: ayukuma <quic_ayukuma@quicinc.com>
+Date: Thu, 16 Nov 2023 15:55:02 +0530
+Subject: [PATCH] magle_patch_fw4_02
+
+This patch will create a new option mangle in uci, which is going to be a
+boolean value. This option mangle will help to take accept/drop decision
+in mangle table.
+
+Signed-off-by: Ayush Kumar<quic_ayukuma@quicinc.com>
+---
+ root/usr/share/ucode/fw4.uc | 58 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+index 47e86cd..350d549 100644
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -1386,6 +1386,33 @@ return {
+ 		return rv;
+ 	},
+ 
++	parse_connmark: function(val) {
++		let rv = this.parse_invert(val);
++		let m = rv ? match(rv.val, /^(0?x?[0-9a-f]+)(\/(0?x?[0-9a-f]+))?$/i) : null;
++
++		if (!m)
++			return null;
++
++		let n = +m[1];
++
++		if (n != n || n > 0xFFFFFFFF)
++			return null;
++
++		rv.mark = n;
++		rv.mask = 0xFFFFFFFF;
++
++		if (m[3]) {
++			n = +m[3];
++
++			if (n != n || n > 0xFFFFFFFF)
++				return null;
++
++			rv.mask = n;
++		}
++
++		return rv;
++	},
++
+ 	parse_target: function(val) {
+ 		return this.parse_enum(val, [
+ 			"accept",
+@@ -1395,6 +1422,7 @@ return {
+ 			"helper",
+ 			"mark",
+ 			"dscp",
++			"connmark",
+ 			"dnat",
+ 			"snat",
+ 			"masquerade",
+@@ -2243,6 +2271,7 @@ return {
+ 			limit_burst: [ "int" ],
+ 
+ 			utc_time: [ "bool" ],
++			mangle: [ "bool" ],
+ 			start_date: [ "date" ],
+ 			stop_date: [ "date" ],
+ 			start_time: [ "time" ],
+@@ -2251,6 +2280,7 @@ return {
+ 			monthdays: [ "monthdays", null, UNSUPPORTED ],
+ 
+ 			mark: [ "mark" ],
++			connmark: [ "connmark" ],
+ 			set_mark: [ "mark", null, NO_INVERT ],
+ 			set_xmark: [ "mark", null, NO_INVERT ],
+ 
+@@ -2284,6 +2314,10 @@ return {
+ 			this.warn_section(data, "must specify option 'set_mark' or 'set_xmark' for target 'mark'");
+ 			return;
+ 		}
++		else if (rule.target == "connmark" && !rule.set_mark && !rule.set_xmark) {
++			this.warn_section(data, "must specify option 'set_mark' or 'set_xmark' for target 'connmark'");
++			return;
++		}
+ 		else if (rule.target == "helper" && !rule.set_helper) {
+ 			this.warn_section(data, "must specify option 'set_helper' for target 'helper'");
+ 			return;
+@@ -2377,7 +2411,29 @@ return {
+ 				r.chain = `helper_${r.src.zone.name}`;
+ 				r.src.zone.dflags.helper = true;
+ 			}
+-			else if (r.target == "mark" || r.target == "dscp") {
++			else if (r.target == "mark" || r.target == "dscp" || r.target == "connmark") {
++				if ((r.src?.any && r.dest?.any) || (r.src?.zone && r.dest?.zone))
++					r.chain = "mangle_forward";
++				else if (r.src?.any && r.dest?.zone)
++					r.chain = "mangle_postrouting";
++				else if (r.src?.zone && r.dest?.any)
++					r.chain = "mangle_prerouting";
++				else if (r.src && !r.dest)
++					r.chain = "mangle_input";
++				else
++					r.chain = "mangle_output";
++
++				if (r.src?.zone) {
++					r.src.zone.dflags[r.target] = true;
++					r.iifnames = null_if_empty(r.src.zone.match_devices);
++				}
++
++				if (r.dest?.zone) {
++					r.dest.zone.dflags[r.target] = true;
++					r.oifnames = null_if_empty(r.dest.zone.match_devices);
++				}
++			}
++			else if ((r.target == "accept" || r.target == "drop" || r.target == "reject") && r.mangle == "1") {
+ 				if ((r.src?.any && r.dest?.any) || (r.src?.zone && r.dest?.zone))
+ 					r.chain = "mangle_forward";
+ 				else if (r.src?.any && r.dest?.zone)
+-- 
+2.17.1
+

@@ -1,0 +1,47 @@
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 4fd17177e44cb6f466c22e9b8757ee20ee245b3e Mon Sep 17 00:00:00 2001
+From: ayukuma <quic_ayukuma@quicinc.com>
+Date: Sun, 6 Oct 2024 15:27:58 +0530
+Subject: [PATCH] option_extra_enable-02
+
+This patch will enable option extra in fw4. This option takes extra arguments to
+pass to nftables directly. Useful mainly to specify additional options, that uci dont provide.
+
+Signed-off-by: Ayush Kumar<quic_ayukuma@quicinc.com>
+---
+ root/usr/share/firewall4/templates/rule.uc | 2 ++
+ root/usr/share/ucode/fw4.uc                | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/root/usr/share/firewall4/templates/rule.uc b/root/usr/share/firewall4/templates/rule.uc
+index 69503f3..76bcf51 100644
+--- a/root/usr/share/firewall4/templates/rule.uc
++++ b/root/usr/share/firewall4/templates/rule.uc
+@@ -78,6 +78,8 @@
+ {%+ else -%}
+ {%+  if (rule.counter): -%}
+ 	counter {%+ endif -%}
++{%+ if (rule.extra): -%}
++       {{ rule.extra }} {%+ endif -%}
+ {%+  if (rule.log): -%}
+ 	log prefix {{ fw4.quote(rule.log, true) }} {%+ endif -%}
+ {%+  if (rule.target == "mark"): -%}
+diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+index 8c4ac6f..29a76e6 100644
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -2296,7 +2296,7 @@ return {
+ 			dest_port: [ "port", null, PARSE_LIST ],
+ 
+ 			icmp_type: [ "icmptype", null, PARSE_LIST ],
+-			extra: [ "string", null, UNSUPPORTED ],
++			extra: [ "string", this.section_id(data[".extra"]) ],
+ 
+ 			limit: [ "limit" ],
+ 			limit_burst: [ "int" ],
+-- 
+2.17.1
+
