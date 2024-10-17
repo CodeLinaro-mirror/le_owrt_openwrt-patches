@@ -1,0 +1,70 @@
+From 1f642712e72a28c1d76b8dfa97741186ddfb5ede Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Date: Mon, 11 Sep 2023 11:34:39 +0530
+Subject: [PATCH] patch_makefile
+signed-off: Dheeraj Kumar <quic_dhekum@quicinc.com>
+
+---
+ blobmsg_json.h |  8 ++++++++
+ ustream.h      | 10 ++++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/blobmsg_json.h b/blobmsg_json.h
+index 9dfc02d..ad0fbc7 100644
+--- a/blobmsg_json.h
++++ b/blobmsg_json.h
+@@ -16,6 +16,10 @@
+ #ifndef __BLOBMSG_JSON_H
+ #define __BLOBMSG_JSON_H
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
+ struct json_object;
+ 
+ #include <stdbool.h>
+@@ -56,4 +60,8 @@ static inline char *blobmsg_format_json_value_indent(struct blob_attr *attr, int
+ 	return blobmsg_format_json_value_with_cb(attr, NULL, NULL, indent);
+ }
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ #endif
+diff --git a/ustream.h b/ustream.h
+index 9a30618..47d1358 100644
+--- a/ustream.h
++++ b/ustream.h
+@@ -19,12 +19,18 @@
+ #ifndef __USTREAM_H
+ #define __USTREAM_H
+ 
++
+ #include <stdarg.h>
+ #include "uloop.h"
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
+ struct ustream;
+ struct ustream_buf;
+ 
++
+ enum read_blocked_reason {
+ 	READ_BLOCKED_USER = (1 << 0),
+ 	READ_BLOCKED_FULL = (1 << 1),
+@@ -218,4 +224,8 @@ static inline bool ustream_poll(struct ustream *s)
+ 	return s->poll(s);
+ }
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ #endif
+-- 
+2.17.1
+
