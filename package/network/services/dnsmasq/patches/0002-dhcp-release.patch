@@ -1,0 +1,45 @@
+From 46df6d5f2e15e62ee9281d94b2371c63d9368b30 Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Date: Wed, 24 Jan 2024 17:51:53 +0000
+Subject: [PATCH] dhcp-release
+signed-off: Dheeraj Kumar <quic_dhekum@quicinc.com>
+---
+ Makefile | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 48e8d3b..c0c9572 100644
+--- a/Makefile
++++ b/Makefile
+@@ -94,7 +94,7 @@ all : $(BUILDDIR)
+  top="$(top)" \
+  build_cflags="$(version) $(dbus_cflags) $(idn2_cflags) $(idn_cflags) $(ct_cflags) $(lua_cflags) $(nettle_cflags) $(nft_cflags)" \
+  build_libs="$(dbus_libs) $(idn2_libs) $(idn_libs) $(ct_libs) $(lua_libs) $(sunos_libs) $(nettle_libs) $(gmp_libs) $(ubus_libs) $(nft_libs)" \
+- -f $(top)/Makefile dnsmasq 
++ -f $(top)/Makefile dnsmasq dhcp-release
+ 
+ mostly_clean :
+ 	rm -f $(BUILDDIR)/*.mo $(BUILDDIR)/*.pot 
+@@ -112,6 +112,9 @@ install-common :
+ 	$(INSTALL) -d $(DESTDIR)$(MANDIR)/man8
+ 	$(INSTALL) -m 644 $(MAN)/dnsmasq.8 $(DESTDIR)$(MANDIR)/man8 
+ 	$(INSTALL) -m 755 $(BUILDDIR)/dnsmasq $(DESTDIR)$(BINDIR)
++	$(INSTALL) -m 755 $(top)/contrib/lease-tools/dhcp_release $(DESTDIR)$(BINDIR)
++	$(INSTALL) -m 755 $(top)/contrib/lease-tools/dhcp_release6 $(DESTDIR)$(BINDIR)
++	$(INSTALL) -m 755 $(top)/contrib/lease-tools/dhcp_lease_time $(DESTDIR)$(BINDIR)
+ 
+ all-i18n : $(BUILDDIR)
+ 	@cd $(BUILDDIR) && $(MAKE) \
+@@ -169,6 +172,9 @@ $(objs): $(copts_conf) $(hdrs)
+ 
+ dnsmasq : $(objs)
+ 	$(CC) $(LDFLAGS) -o $@ $(objs) $(build_libs) $(LIBS) 
++		
++dhcp-release : $(objsc)
++	cd $(top)/contrib/lease-tools/ && $(MAKE)
+ 
+ dnsmasq.pot : $(objs:.o=.c) $(hdrs)
+ 	$(XGETTEXT) -d dnsmasq --foreign-user --omit-header --keyword=_ -o $@ -i $(objs:.o=.c)
+-- 
+2.17.1
+
