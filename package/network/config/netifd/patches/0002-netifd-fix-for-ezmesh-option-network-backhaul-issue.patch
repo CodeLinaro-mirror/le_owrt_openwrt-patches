@@ -1,0 +1,59 @@
+From 40699d95ed4e7444a500c441f5b29b144a359261 Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Date: Wed, 27 Sep 2023 19:27:03 +0530
+Subject: [PATCH] netifd fix for ezmesh option network backhaul issue
+
+Signed-off by: Aslam Basha Mahammad (amahamma)
+
+---
+ device.c | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/device.c b/device.c
+index c719f6f..f6c507a 100644
+--- a/device.c
++++ b/device.c
+@@ -655,8 +655,38 @@ static struct device *
+ device_create_default(const char *name, bool external)
+ {
+ 	struct device *dev;
+-
+-	if (!external && system_if_force_external(name))
++        bool is_ezmesh_enabled = false;
++
++        if(!strncmp(name, "ath", strlen("ath")) || !strncmp(name, "wlan", strlen("wlan")) || !strncmp(name, "mld", strlen("mld")))
++        {
++            char result[100] = {'\0'};
++            char *cmd = "uci get repacd.repacd.Ezmesh";
++            int res = 0;
++
++            FILE *fp = popen(cmd, "r");
++            if (fp)
++            {
++                if (fgets(result, 100, fp) != NULL)
++                {
++                    pclose(fp);
++                    res = atoi(result);
++                    D(DEVICE, "Get uci repacd.Ezmesh success. result: %s, res: %d\n", result, res);
++                    if(res == 1)
++                        is_ezmesh_enabled = true;
++                }
++                else
++                {
++                    pclose(fp);
++                    D(DEVICE, "Fail to read output:%s, errno:%d\n", cmd, errno);
++                }
++            }
++            else
++            {
++                D(DEVICE, "Error in executing %s, errno:%d\n", cmd, errno);
++            }
++        }
++
++        if (!external && system_if_force_external(name) && !is_ezmesh_enabled)
+ 		return NULL;
+ 
+ 	D(DEVICE, "Create simple device '%s'\n", name);
+-- 
+2.7.4
+
