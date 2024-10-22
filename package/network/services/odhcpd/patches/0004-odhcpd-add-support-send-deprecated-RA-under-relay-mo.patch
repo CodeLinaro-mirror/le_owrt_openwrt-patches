@@ -1,0 +1,177 @@
+From a05d6ec55a0db00aaee8493b38343d4fe2c997c8 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Mon, 18 Mar 2024 22:08:45 +0800
+Subject: [PATCH] odhcpd: add support send deprecated RA under relay mode
+
+under relay mode:
+whenever forward RA from master interface, store it in locally,
+and so when we see the lastet RA data not null, it was master interface.
+
+then whenever setup router interface,
+if latest RA data not null and it is not master interface anymore,
+send deprecated RA.
+
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ src/config.c |  1 +
+ src/odhcpd.h |  3 ++
+ src/router.c | 94 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 97 insertions(+), 1 deletion(-)
+
+diff --git a/src/config.c b/src/config.c
+index a34e7c3..a61125f 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -1301,6 +1301,7 @@ void odhcpd_reload(void)
+ {
+ 	struct uci_context *uci = uci_alloc_context();
+ 	struct interface *master = NULL, *i, *tmp;
++	syslog(LOG_DEBUG, "odhcpd_reload");
+ 
+ 	if (!uci)
+ 		return;
+diff --git a/src/odhcpd.h b/src/odhcpd.h
+index c894aa2..6eb1526 100644
+--- a/src/odhcpd.h
++++ b/src/odhcpd.h
+@@ -303,6 +303,9 @@ struct interface {
+ 	char dhcpv6_pd_manager[128];
+ 	struct in6_addr dhcpv6_pd_cer;
+ 
++	uint8_t *latest_ra_data;
++	size_t latest_ra_data_len;
++
+ 	// Services
+ 	enum odhcpd_mode ra;
+ 	enum odhcpd_mode dhcpv6;
+diff --git a/src/router.c b/src/router.c
+index bbeb003..102cbe0 100644
+--- a/src/router.c
++++ b/src/router.c
+@@ -75,11 +75,79 @@ out:
+ 	return ret;
+ }
+ 
++static void send_deprecated_ra_under_relay_mode(struct interface *iface)
++{
++	if(iface->latest_ra_data == NULL)
++		return;
++
++	//Send deprecated RA when relay master interface down
++	syslog(LOG_INFO, "send depercated RA since not act as master anymore");
++
++	//modify the latest ra data with lifetime be zero.
++	struct nd_router_advert* adv = (struct nd_router_advert *)iface->latest_ra_data;;
++
++	adv->nd_ra_router_lifetime = 0;
++	adv->nd_ra_reachable = 0;
++	adv->nd_ra_retransmit = 0;
++
++	uint8_t *opt_str = (uint8_t *)(iface->latest_ra_data + sizeof(struct nd_router_advert));
++	size_t orig_len = iface->latest_ra_data_len;
++
++	while (orig_len > 0) {
++		if (orig_len < 2) {
++			syslog(LOG_ERR, "garbage in RA");
++			break;
++		}
++
++		size_t optlen = (opt_str[1] << 3);
++
++		if (optlen == 0) {
++			syslog(LOG_ERR, "zero length option in RA");
++			break;
++		} else if (optlen > orig_len) {
++			syslog(LOG_ERR, "option length greater than total  length in RA (type %d, optlen %d, len %d)",
++							(int)*opt_str, optlen, orig_len);
++			break;
++		}
++
++		switch (*opt_str) {
++			case ND_OPT_PREFIX_INFORMATION:
++			{
++				struct nd_opt_prefix_info *pinfo = (struct nd_opt_prefix_info *)opt_str;
++				pinfo->nd_opt_pi_valid_time = 0;
++				pinfo->nd_opt_pi_preferred_time = 0;
++			}
++			break;
++
++			default:
++				break;
++		}
++		orig_len -= optlen;
++		opt_str += optlen;
++	}
++
++	forward_router_advertisement(iface, iface->latest_ra_data, iface->latest_ra_data_len);
++
++	iface->latest_ra_data = NULL;
++	iface->latest_ra_data_len = 0;
++}
++
+ 
+ int router_setup_interface(struct interface *iface, bool enable)
+ {
+ 	int ret = 0;
+ 
++	syslog(LOG_ERR, "router_setup_interface: debug: iface=%s/%x, enable=%d, ra=%d,latest_ra_data=%x, iface->router_event.uloop.fd=%d, master=%d",
++		iface->ifname, iface, enable, iface->ra, iface->latest_ra_data, iface->router_event.uloop.fd, iface->master);
++
++	//latest_ra_data not NULL means iface was master and have RA delivered;
++	if(iface && iface->latest_ra_data != NULL)
++	{
++		//the iface is not master anymore, we need send deprecated RA.
++		if(!enable || !iface->master)
++			send_deprecated_ra_under_relay_mode(iface);
++	}
++
+ 	enable = enable && (iface->ra != MODE_DISABLED);
+ 
+ 	if (!fp_route) {
+@@ -1268,10 +1336,34 @@ static void handle_icmpv6(void *addr, void *data, size_t len,
+ 				if (!c->master || c->ra != MODE_RELAY)
+ 					continue;
+ 
++				if(c->addr6_len == 0)
++				{
++					syslog(LOG_ERR, "master iface have no valid IPv6 addr, ignore forward RS");
++					continue;
++				}
++
+ 				forward_router_solicitation(c);
+ 			}
+ 		} else if (hdr->icmp6_type == ND_ROUTER_ADVERT && (iface->master || iface->sta_bridge_mode))
++		{
++			if(iface->latest_ra_data != NULL)
++			{
++				free(iface->latest_ra_data);
++				iface->latest_ra_data = NULL;
++				iface->latest_ra_data_len = 0;
++			}
++			iface->latest_ra_data = malloc(len);
++			iface->latest_ra_data_len = len;
++			memcpy(iface->latest_ra_data, data, len);
++
++			syslog(LOG_ERR, "handle_icmpv6: iface=%x, latest_ra_data=%x", iface, iface->latest_ra_data );
++			if(iface->addr6_len == 0)
++			{
++				syslog(LOG_ERR, "master iface have no valid IPv6 addr, ignore forward RA");
++			}
++			else
+ 			forward_router_advertisement(iface, data, len);
++		}
+ 	}
+ }
+ 
+@@ -1332,7 +1424,7 @@ static void forward_router_advertisement(const struct interface *iface, uint8_t
+ 	inet_pton(AF_INET6, ALL_IPV6_NODES, &all_nodes.sin6_addr);
+ 
+ 	avl_for_each_element(&interfaces, c, avl) {
+-		if (c->ra != MODE_RELAY || c->master)
++		if (c == iface || c->ra != MODE_RELAY || c->master)
+ 			continue;
+ 
+ 		/* Fixup source hardware address option */
+-- 
+2.41.0.windows.3
+

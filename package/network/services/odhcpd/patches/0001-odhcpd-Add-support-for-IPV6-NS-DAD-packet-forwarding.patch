@@ -1,0 +1,564 @@
+From bc8b059292264a7256012fc4b0627d31c37bd6a5 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Fri, 15 Mar 2024 12:53:27 +0800
+Subject: [PATCH 1/4] odhcpd: Add support for IPV6 NS DAD packet forwarding
+ logic
+
+Support to forward IPv6 NS-DAD packets received on the bridge
+towards Modem to address a potential IPv6 address conflict.
+
+Signed-off-by: aryamali <quic_aryamali@quicinc.com>
+---
+ src/config.c |   8 +-
+ src/ndp.c    | 362 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/odhcpd.h |  15 +++
+ 3 files changed, 383 insertions(+), 2 deletions(-)
+
+diff --git a/src/config.c b/src/config.c
+index 62d4857..098fa4a 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -30,7 +30,7 @@ struct vlist_tree leases = VLIST_TREE_INIT(leases, lease_cmp, lease_update, true
+ AVL_TREE(interfaces, avl_strcmp, false, NULL);
+ struct config config = {.legacy = false, .main_dhcpv4 = false,
+ 			.dhcp_cb = NULL, .dhcp_statefile = NULL, .dhcp_hostsfile = NULL,
+-			.log_level = LOG_WARNING};
++			.log_level = LOG_WARNING, .dad_forward = false};
+ 
+ #define START_DEFAULT	100
+ #define LIMIT_DEFAULT	150
+@@ -181,6 +181,7 @@ enum {
+ 	ODHCPD_ATTR_LEASETRIGGER,
+ 	ODHCPD_ATTR_LOGLEVEL,
+ 	ODHCPD_ATTR_HOSTSFILE,
++	ODHCPD_ATTR_DAD_FORWARD,
+ 	ODHCPD_ATTR_MAX
+ };
+ 
+@@ -191,6 +192,7 @@ static const struct blobmsg_policy odhcpd_attrs[ODHCPD_ATTR_MAX] = {
+ 	[ODHCPD_ATTR_LEASETRIGGER] = { .name = "leasetrigger", .type = BLOBMSG_TYPE_STRING },
+ 	[ODHCPD_ATTR_LOGLEVEL] = { .name = "loglevel", .type = BLOBMSG_TYPE_INT32 },
+ 	[ODHCPD_ATTR_HOSTSFILE] = { .name = "hostsfile", .type = BLOBMSG_TYPE_STRING },
++	[ODHCPD_ATTR_DAD_FORWARD] = { .name = "dad_forward", .type = BLOBMSG_TYPE_BOOL },
+ };
+ 
+ const struct uci_blob_param_list odhcpd_attr_list = {
+@@ -349,6 +351,9 @@ static void set_config(struct uci_section *s)
+ 			setlogmask(LOG_UPTO(config.log_level));
+ 		}
+ 	}
++
++	if ((c = tb[ODHCPD_ATTR_DAD_FORWARD]))
++		config.dad_forward = blobmsg_get_bool(c);
+ }
+ 
+ static double parse_leasetime(struct blob_attr *c) {
+@@ -565,6 +570,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+ 		iface->dhcpv6_event.uloop.fd = -1;
+ 		iface->ndp_event.uloop.fd = -1;
+ 		iface->ndp_ping_fd = -1;
++		iface->ndp_fd = -1;
+ 		iface->dhcpv4_event.uloop.fd = -1;
+ 		INIT_LIST_HEAD(&iface->ia_assignments);
+ 		INIT_LIST_HEAD(&iface->dhcpv4_assignments);
+diff --git a/src/ndp.c b/src/ndp.c
+index 0ec6fed..3c40da5 100644
+--- a/src/ndp.c
++++ b/src/ndp.c
+@@ -29,6 +29,11 @@
+ #include <linux/filter.h>
+ #include <linux/neighbour.h>
+ 
++#include <linux/in6.h>
++#include <net/if.h>
++#include <sys/ioctl.h>
++#include <linux/sockios.h>
++
+ #include "dhcpv6.h"
+ #include "odhcpd.h"
+ 
+@@ -39,6 +44,10 @@ static void setup_addr_for_relaying(struct in6_addr *addr, struct interface *ifa
+ static void handle_solicit(void *addr, void *data, size_t len,
+ 		struct interface *iface, void *dest);
+ 
++static struct in6_addr all_routers_in6_addr;
++static struct in6_addr all_mld2_routers_in6_addr;
++static struct in6_addr all_hosts_in6_addr;
++
+ /* Filter ICMPv6 messages of type neighbor solicitation */
+ static struct sock_filter bpf[] = {
+ 	BPF_STMT(BPF_LD | BPF_B | BPF_ABS, offsetof(struct ip6_hdr, ip6_nxt)),
+@@ -49,7 +58,22 @@ static struct sock_filter bpf[] = {
+ 	BPF_STMT(BPF_RET | BPF_K, 0xffffffff),
+ 	BPF_STMT(BPF_RET | BPF_K, 0),
+ };
++struct sock_filter bpf_ns_na[] =
++{
++	/* offsets are adjusted assuming message is captured at IPv6 header */
++	/* goto first byte and compare version 6 with first 4 bits */
++	{ 0x30, 0, 0, 0x00000000 },
++	{ 0x74, 0, 0, 0x00000004 },
++	{ 0x15, 0, 3, 0x00000006 },
++	/* go further 6 bytes ahead and compare ICMPv6 type 0x3a */
++	{ 0x30, 0, 0, 0x00000006},
++	{ 0x15, 0, 1, 0x0000003a},
++	/* return */
++	{ 0x6, 0, 0, 0x00000500}, /* PASS - return upto 1280 bytes */
++	{ 0x6, 0, 0, 0x00000000}  /* FAIL - return no bytes */
++};
+ static const struct sock_fprog bpf_prog = {sizeof(bpf) / sizeof(*bpf), bpf};
++static const struct sock_fprog bpf_prog_ns_na = {sizeof(bpf_ns_na) / sizeof(*bpf_ns_na), bpf_ns_na};
+ static struct netevent_handler ndp_netevent_handler = { .cb = ndp_netevent_cb, };
+ 
+ /* Initialize NDP-proxy */
+@@ -65,6 +89,255 @@ int ndp_init(void)
+ 	return ret;
+ }
+ 
++
++static void odhcpd_add_128_bit_route(struct interface *iface, struct ip6_hdr *ip6)
++{
++	struct nd_neighbor_solicit *icmp6 = (struct nd_neighbor_solicit*)&ip6[1];
++
++	char ipbuff[INET6_ADDRSTRLEN];
++	inet_ntop(AF_INET6, &icmp6->nd_ns_target, ipbuff, sizeof(ipbuff));
++
++	netlink_setup_proxy_neigh(&icmp6->nd_ns_target, iface->ifindex, true);
++	netlink_setup_route(&icmp6->nd_ns_target, 128, iface->ifindex, NULL, 1024, true);
++	netlink_dump_neigh_table(false);
++}
++
++static int create_nd_socket(struct interface *iface)
++{
++	int nd_true = 1;
++	int nd_false = 0;
++	int ret = 0;
++	struct ipv6_mreq_test mreq_test;
++	int val = 2;
++
++	struct ifreq ifr;
++	memset(&ifr, 0, sizeof(ifr));
++
++	/* Create socket -> ndp_fd */
++	iface->ndp_fd = socket(AF_INET6, SOCK_RAW, IPPROTO_RAW);
++	if (iface->ndp_fd < 0)
++	{
++		syslog(LOG_ERR, "socket(AF_INET6): %mfor ifname:%s, errno: %d",
++				iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	if (setsockopt(iface->ndp_fd, SOL_SOCKET, SO_BINDTODEVICE,
++			iface->ifname, strlen(iface->ifname)) < 0) {
++		syslog(LOG_ERR, "setsockopt(SO_BINDTODEVICE): %m");
++		ret = -1;
++		goto out;
++	}
++
++	inet_pton(AF_INET6, ALL_ROUTERS_MGROUP, &all_routers_in6_addr);
++	inet_pton(AF_INET6, ALL_ROUTERS_MLD2, &all_mld2_routers_in6_addr);
++	inet_pton(AF_INET6, ALL_HOSTS_MGROUP, &all_hosts_in6_addr);
++
++	if (setsockopt(iface->ndp_fd,IPPROTO_IPV6, IPV6_MULTICAST_IF,
++				&iface->ifindex, sizeof(iface->ifindex)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt(IPV6_MULTICAST_IF): %m for ifname:%s, errno: %d",
++				iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	memset(&mreq_test, 0, sizeof(mreq_test));
++	mreq_test.ipv6mr_multicast = all_routers_in6_addr;
++	mreq_test.ipv6mr_ifindex = iface->ifindex;
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
++				&mreq_test, sizeof(mreq_test)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt IPV6_ADD_MEMBERSHIP(FF02::2): %m"
++				"for ifname: %s, errno: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	memset(&mreq_test, 0, sizeof(mreq_test));
++	mreq_test.ipv6mr_multicast = all_hosts_in6_addr;
++	mreq_test.ipv6mr_ifindex = iface->ifindex;
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
++				&mreq_test,sizeof(mreq_test)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt IPV6_ADD_MEMBERSHIP(FF02::1): %m"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	memset(&mreq_test, 0, sizeof(mreq_test));
++	mreq_test.ipv6mr_multicast = all_mld2_routers_in6_addr;
++	mreq_test.ipv6mr_ifindex = iface->ifindex;
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
++				&mreq_test, sizeof(mreq_test)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt IPV6_ADD_MEMBERSHIP(FF02::16): %"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	/* This is required by RFC 4861 */
++	val = 255;
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &val, sizeof(val)) < 0) {
++		syslog(LOG_ERR, "setsockopt(IPV6_MULTICAST_HOPS): %m"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &val, sizeof(val)) < 0) {
++		syslog(LOG_ERR, "setsockopt(IPV6_UNICAST_HOPS): %m"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	if (setsockopt(iface->ndp_fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &nd_false, sizeof(nd_false)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt(IPV6_MULTICAST_LOOP): %m"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	if (setsockopt(iface->ndp_fd,IPPROTO_IPV6,IPV6_RECVPKTINFO,&nd_true,sizeof(nd_true)) < 0)
++	{
++		syslog(LOG_ERR, "setsocketopt(IPV6_RECVPKTINFO): %m"
++				"for ifname: %s, err num: %d", iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	strlcpy(ifr.ifr_name, iface->ifname, IFNAMSIZ);
++
++	if (ioctl(iface->ndp_fd, SIOCGIFFLAGS, &ifr) < 0)
++	{
++		syslog(LOG_ERR, "ioctl failed: %m for ifname: %s, err num: %d",
++						iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++
++	ifr.ifr_flags |= IFF_PROMISC;
++	if (ioctl(iface->ndp_fd, SIOCGIFFLAGS, &ifr) < 0)
++	{
++		syslog(LOG_ERR, "Failed to set PROMISC mode: %m for ifname: %s, err num: %d",
++						iface->ifname, errno);
++		ifr.ifr_flags = ifr.ifr_flags & ~IFF_PROMISC;
++		ret = -1;
++		goto out;
++	}
++	else
++	{
++		syslog(LOG_ERR, "PROMISC mode set for iface: %s", iface->ifname);
++	}
++
++	ifr.ifr_flags |= IFF_ALLMULTI;
++	if (ioctl(iface->ndp_fd, SIOCGIFFLAGS, &ifr) < 0) {
++		syslog(LOG_ERR, "Failed to set IFF_ALLMULTI mode: %m for ifname: %s, err num: %d",
++						iface->ifname, errno);
++		ret = -1;
++		goto out;
++	}
++	else
++	{
++		syslog(LOG_ERR, "IFF_ALLMULTI mode set for iface: %s", iface->ifname);
++	}
++	return 0;
++out:
++	return ret;
++}
++
++static void forward_dad_packet(struct interface *iface,
++		struct sockaddr_ll *ll, struct ip6_hdr *ip6,
++		uint8_t *data_buf, uint64_t data_buf_length)
++{
++	char ipbuffer[INET6_ADDRSTRLEN];
++
++	/* NULL checks */
++	if (iface == NULL || ll == NULL || ip6 == NULL || (data_buf_length == 0 || data_buf == NULL)) {
++		return;
++	}
++
++	/** NOTE: Indicates NS packet received is DAD */
++	syslog(LOG_DEBUG, "NS-DAD packet found");
++
++	/** NOTE: Indicates dad packets needs to be forwarded to rmnet_dataX interface */
++	/* Additional check to confirm destination iface has ndp parameter set to relay mode
++	and iface is set as master(Ideal Configurations of rmnet_dataX interface) */
++
++	/* Check if packet is of type AF_PACKET */
++	if (ll->sll_family != AF_PACKET)
++		return;
++
++	/** Construct the message */
++	/* Use the existing ip6_hdr structure to populate the destination address */
++	struct sockaddr_in6 destn = { .sin6_family = AF_INET6, .sin6_addr = ip6->ip6_dst, .sin6_scope_id = iface->ifindex };
++
++	/** NOTE: Total bytes to copy from the received raw message is the sum of IPv6 header length and ICMPv6 header length.
++	 *  As per spec: IPv6 header length is 40 bytes. And IPv6 header contains a Payload length field indicating ICMPv6 header length
++	 *  plus optional parameters */
++	uint16_t total_bytes_to_copy = 40 + (uint16_t)ntohs(ip6->ip6_ctlun.ip6_un1.ip6_un1_plen);
++	syslog(LOG_DEBUG, "Total bytes to copy from the received raw message: %d",total_bytes_to_copy);
++
++	uint8_t data_buf_copied[total_bytes_to_copy];
++	for (int i = 0; i < total_bytes_to_copy; i++) {
++		data_buf_copied[i] = data_buf[i];
++	}
++
++	/* Construct iovector */
++	struct iovec iov3 = { data_buf_copied, sizeof(data_buf_copied) };
++
++	struct msghdr msg1 = {
++		.msg_name = (void *) &destn,
++		.msg_namelen = sizeof(destn),
++		.msg_iov = &iov3,
++		.msg_iovlen = 1
++	};
++
++	inet_ntop(AF_INET6, &ip6->ip6_dst, ipbuffer, sizeof(ipbuffer));
++
++	ssize_t sent = sendmsg(iface->ndp_fd, &msg1, MSG_DONTWAIT);
++	if (sent < 0)
++		syslog(LOG_ERR, "Failed to send to %s%%%s@%s (%m); errno: %d",
++				ipbuffer, iface->name, iface->ifname, errno);
++	else
++		syslog(LOG_DEBUG, "Sent %zd bytes to %s%%%s@%s",
++				sent, ipbuffer, iface->name, iface->ifname);
++
++} /* End odhcpd_process_dad_packet() */
++
++/* Send a Neighbor Advertisement. */
++static void send_dad_na(struct in6_addr *to_addr,
++		const struct interface *iface, struct in6_addr *for_addr,
++		const uint8_t *mac)
++{
++	struct sockaddr_in6 dest = { .sin6_family = AF_INET6, .sin6_addr = *to_addr };
++	char pbuf[sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr) + 6];
++	struct nd_neighbor_advert *adv = (struct nd_neighbor_advert*)pbuf;
++	struct nd_opt_hdr *opt = (struct nd_opt_hdr*) &pbuf[sizeof(struct nd_neighbor_advert)];
++	struct iovec iov = { .iov_base = &pbuf, .iov_len = sizeof(pbuf) };
++	char ipbuf[INET6_ADDRSTRLEN];
++
++	memset(pbuf, 0, sizeof(pbuf));
++	adv->nd_na_hdr = (struct icmp6_hdr) {
++		.icmp6_type = ND_NEIGHBOR_ADVERT,
++		.icmp6_dataun.icmp6_un_data32 = {0}
++	};
++	adv->nd_na_target = *for_addr;
++	*opt = (struct nd_opt_hdr) { .nd_opt_type = ND_OPT_TARGET_LINKADDR, .nd_opt_len = 1 };
++	memcpy(&pbuf[sizeof(struct nd_neighbor_advert) + sizeof(struct nd_opt_hdr)], mac, 6);
++
++	inet_ntop(AF_INET6, to_addr, ipbuf, sizeof(ipbuf));
++	syslog(LOG_DEBUG, "Answering NS to %s on %s", ipbuf, iface->ifname);
++
++	odhcpd_send(iface->ndp_ping_fd, &dest, &iov, 1, iface);
++}
++
++
+ int ndp_setup_interface(struct interface *iface, bool enable)
+ {
+ 	int ret = 0, procfd;
+@@ -86,6 +359,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 		iface->ndp_ping_fd = -1;
+ 	}
+ 
++	if (iface->ndp_fd >= 0) {
++		close(iface->ndp_fd);
++		iface->ndp_fd = -1;
++	}
++
+ 	if (iface->ndp_event.uloop.fd >= 0) {
+ 		uloop_fd_delete(&iface->ndp_event.uloop);
+ 		close(iface->ndp_event.uloop.fd);
+@@ -170,6 +448,18 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 		}
+ #endif
+ 
++		if (config.dad_forward && iface->master && iface->ndp != MODE_RELAY)
++		{
++			//need receive NA message from master in case DAD forward
++			if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
++					&bpf_prog_ns_na, sizeof(bpf_prog_ns_na)))
++			{
++				syslog(LOG_ERR, "setsockopt(SO_ATTACH_FILTER) for NS/NA: %m");
++				ret = -1;
++				goto out;
++			}
++		}
++		else
+ 		if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
+ 				&bpf_prog, sizeof(bpf_prog))) {
+ 			syslog(LOG_ERR, "setsockopt(SO_ATTACH_FILTER): %m");
+@@ -188,6 +478,7 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 			goto out;
+ 		}
+ 
++		if (!iface->master) {
+ 		memset(&mreq, 0, sizeof(mreq));
+ 		mreq.mr_ifindex = iface->ifindex;
+ 		mreq.mr_type = PACKET_MR_ALLMULTI;
+@@ -195,10 +486,15 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 
+ 		if (setsockopt(iface->ndp_event.uloop.fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
+ 				&mreq, sizeof(mreq)) < 0) {
+-			syslog(LOG_ERR, "setsockopt(PACKET_ADD_MEMBERSHIP): %m");
++			syslog(LOG_ERR, "ndp_setup_interface#setsockopt(PACKET_ADD_MEMBERSHIP): %m"
++				"for ifname: %s, errno: %d", iface->ifname, errno);
+ 			ret = -1;
+ 			goto out;
+ 		}
++		}
++
++		if (config.dad_forward)
++			create_nd_socket(iface);
+ 
+ 		iface->ndp_event.handle_dgram = handle_solicit;
+ 		odhcpd_register(&iface->ndp_event);
+@@ -224,6 +520,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 			close(iface->ndp_ping_fd);
+ 			iface->ndp_ping_fd = -1;
+ 		}
++
++		if (iface->ndp_fd >= 0) {
++			close(iface->ndp_fd);
++			iface->ndp_fd = -1;
++		}
+ 	}
+ 
+ 	if (procfd >= 0)
+@@ -290,9 +591,13 @@ static void ping6(struct in6_addr *addr,
+ 	inet_ntop(AF_INET6, addr, ipbuf, sizeof(ipbuf));
+ 	syslog(LOG_DEBUG, "Pinging for %s on %s", ipbuf, iface->name);
+ 
++#if(0)
+ 	netlink_setup_route(addr, 128, iface->ifindex, NULL, 128, true);
++#endif
+ 	odhcpd_send(iface->ndp_ping_fd, &dest, &iov, 1, iface);
++#if(0)
+ 	netlink_setup_route(addr, 128, iface->ifindex, NULL, 128, false);
++#endif
+ }
+ 
+ /* Send a Neighbor Advertisement. */
+@@ -350,17 +655,72 @@ static void handle_solicit(void *addr, void *data, size_t len,
+ 			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
+ 		return; /* Invalid target */
+ 
++	if (req->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_SOLICIT)
++	{
+ 	inet_ntop(AF_INET6, &req->nd_ns_target, ipbuf, sizeof(ipbuf));
+ 	syslog(LOG_DEBUG, "Got a NS for %s on %s", ipbuf, iface->name);
++	}
++	else if (req->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_ADVERT)
++	{
++		syslog(LOG_DEBUG, "handle_solicit: Got NA message on %s", iface->name);
++	}
++	else
++	{
++	  inet_ntop(AF_INET6, &req->nd_ns_target, ipbuf, sizeof(ipbuf));
++	  syslog(LOG_DEBUG, "handle_solicit: discard Neighbor Mesasge with type %d on %s",
++	  			req->nd_ns_hdr.icmp6_type, iface->name);
++	  return;
++	}
++
++	/* QCMAP changes:
++	 * receive a DAD response from master, send NA response to slave
++	 */
++	if(config.dad_forward && iface->master &&
++		req->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_ADVERT)
++	{
++		inet_pton(AF_INET6, ALL_HOSTS_MGROUP, &all_hosts_in6_addr);
++		if(memcmp(&all_hosts_in6_addr, &ip6->ip6_dst, sizeof(ip6->ip6_dst)) == 0)
++		{
++			uint8_t slave_mac[6];
++			/* check and forward dad packet to master*/
++			avl_for_each_element(&interfaces, c, avl) {
++				if((c->master == 0) && (c->ndp == MODE_RELAY))
++				{
++					inet_ntop(AF_INET6, &ip6->ip6_src, ipbuf, sizeof(ipbuf));
++					syslog(LOG_DEBUG, "QCMAP#handle_solicit#Send DAD-Response for target addr %s on %s ",
++							ipbuf, c->name);
++					odhcpd_get_mac(c, slave_mac);
++					send_dad_na(&all_hosts_in6_addr, c, &ip6->ip6_src, slave_mac);
++				}
++			}
++		}
++	}
+ 
+ 	odhcpd_get_mac(iface, mac);
+ 	if (!memcmp(ll->sll_addr, mac, sizeof(mac)))
+ 		return; /* Looped back */
+ 
++	/* QCMAP changes:
++	 * receive a DAD packet from slave, forwat it to master
++	 */
++	if(config.dad_forward && ns_is_dad && !iface->master)
++	{
++		/* Need to add 128 bit route */
++		odhcpd_add_128_bit_route(iface, ip6);
++
++		/* check and forward dad packet to master*/
++		avl_for_each_element(&interfaces, c, avl) {
++			if(c->master)
++				forward_dad_packet(c, ll, ip6, data, len);
++		}
++	}
++
+ 	avl_for_each_element(&interfaces, c, avl) {
+ 		if (iface != c && c->ndp == MODE_RELAY &&
+ 				(ns_is_dad || !c->external))
++		{
+ 			ping6(&req->nd_ns_target, c);
++		}
+ 	}
+ 
+ 	/* Catch global-addressed NS and answer them manually.
+diff --git a/src/odhcpd.h b/src/odhcpd.h
+index 7a82e98..2af209e 100644
+--- a/src/odhcpd.h
++++ b/src/odhcpd.h
+@@ -167,6 +167,7 @@ struct config {
+ 	char *dhcp_statefile;
+ 	char *dhcp_hostsfile;
+ 	int log_level;
++	bool dad_forward;
+ };
+ 
+ 
+@@ -266,6 +267,7 @@ struct interface {
+ 	// NDP runtime data
+ 	struct odhcpd_event ndp_event;
+ 	int ndp_ping_fd;
++	int ndp_fd;
+ 
+ 	// IPv4 runtime data
+ 	struct odhcpd_ipaddr *addr4;
+@@ -486,3 +488,16 @@ int ndp_setup_interface(struct interface *iface, bool enable);
+ void reload_services(struct interface *iface);
+ 
+ void odhcpd_reload(void);
++
++/** define a structure to initialize packet socket for rmnet interfaces */
++struct ipv6_mreq_test {
++	/* IPv6 multicast address group */
++	struct in6_addr ipv6mr_multicast;
++
++	/* ifindex of the interface */
++	int ipv6mr_ifindex;
++};
++
++#define ALL_HOSTS_MGROUP "FF02::1"
++#define ALL_ROUTERS_MGROUP "FF02::2"
++#define ALL_ROUTERS_MLD2 "FF02::16"
+-- 
+2.41.0.windows.3
+

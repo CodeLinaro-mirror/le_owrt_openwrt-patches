@@ -1,0 +1,415 @@
+From bfa8b5d2c7c001c9049f50157c1480a719591250 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Fri, 15 Mar 2024 13:00:59 +0800
+Subject: [PATCH 2/4] odhcpd: add support bridge mode
+
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ src/config.c |   6 ++
+ src/ndp.c    | 196 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/odhcpd.h |   2 +
+ src/router.c |  81 ++++++++++++++++++++-
+ 4 files changed, 282 insertions(+), 3 deletions(-)
+
+diff --git a/src/config.c b/src/config.c
+index 098fa4a..cd9f808 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -93,6 +93,7 @@ enum {
+ 	IFACE_ATTR_PREFIX_FILTER,
+ 	IFACE_ATTR_PREFERRED_LIFETIME,
+ 	IFACE_ATTR_NTP,
++	IFACE_ATTR_STA_BRIDGE_MODE,
+ 	IFACE_ATTR_MAX
+ };
+ 
+@@ -146,6 +147,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
+ 	[IFACE_ATTR_PREFIX_FILTER] = { .name = "prefix_filter", .type = BLOBMSG_TYPE_STRING },
+ 	[IFACE_ATTR_PREFERRED_LIFETIME] = { .name = "preferred_lifetime", .type = BLOBMSG_TYPE_STRING },
+ 	[IFACE_ATTR_NTP] = { .name = "ntp", .type = BLOBMSG_TYPE_ARRAY },
++	[IFACE_ATTR_STA_BRIDGE_MODE] = { .name = "sta_bridge_mode", .type = BLOBMSG_TYPE_BOOL },
+ };
+ 
+ static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
+@@ -1098,6 +1100,10 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+ 		}
+ 	}
+ 
++	if ((c = tb[IFACE_ATTR_STA_BRIDGE_MODE]))
++		iface->sta_bridge_mode = blobmsg_get_bool(c);
++
++
+ 	return 0;
+ 
+ err:
+diff --git a/src/ndp.c b/src/ndp.c
+index 3c40da5..ce424af 100644
+--- a/src/ndp.c
++++ b/src/ndp.c
+@@ -72,6 +72,18 @@ struct sock_filter bpf_ns_na[] =
+ 	{ 0x6, 0, 0, 0x00000500}, /* PASS - return upto 1280 bytes */
+ 	{ 0x6, 0, 0, 0x00000000}  /* FAIL - return no bytes */
+ };
++#define MAC_ADDR_LEN 6
++#define IPV6_ADDR_LEN 16
++struct proxy_data_info
++{
++	uint8_t src_mac_addr[MAC_ADDR_LEN];
++	struct in6_addr src_ipv6_addr;
++	struct in6_addr dst_ipv6_addr;
++	struct list_head head;
++};
++
++
++struct list_head proxy_data_info_list_head;
+ static const struct sock_fprog bpf_prog = {sizeof(bpf) / sizeof(*bpf), bpf};
+ static const struct sock_fprog bpf_prog_ns_na = {sizeof(bpf_ns_na) / sizeof(*bpf_ns_na), bpf_ns_na};
+ static struct netevent_handler ndp_netevent_handler = { .cb = ndp_netevent_cb, };
+@@ -81,6 +93,8 @@ int ndp_init(void)
+ {
+ 	int ret = 0;
+ 
++	INIT_LIST_HEAD(&proxy_data_info_list_head);
++
+ 	if (netlink_add_netevent_handler(&ndp_netevent_handler) < 0) {
+ 		syslog(LOG_ERR, "Failed to add ndp netevent handler");
+ 		ret = -1;
+@@ -448,7 +462,7 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 		}
+ #endif
+ 
+-		if (config.dad_forward && iface->master && iface->ndp != MODE_RELAY)
++		if ((config.dad_forward && iface->master && iface->ndp != MODE_RELAY) || (iface->sta_bridge_mode))
+ 		{
+ 			//need receive NA message from master in case DAD forward
+ 			if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
+@@ -627,6 +641,140 @@ static void send_na(struct in6_addr *to_addr,
+ 	odhcpd_send(iface->ndp_ping_fd, &dest, &iov, 1, iface);
+ }
+ 
++static int send_ns_na(struct interface *iface,
++							struct sockaddr_ll *ll,
++							struct ip6_hdr *ip6,
++							uint8_t *data_buf, uint64_t data_buf_length,
++							struct sockaddr_in6* destn)
++{
++	char ipbuffer[INET6_ADDRSTRLEN];
++	int packet_size = 0;
++	struct nd_opt_hdr *opt_hdr;
++
++	/* NULL checks */
++	if (iface == NULL || ll == NULL || ip6 == NULL || (data_buf_length == 0 || data_buf == NULL) || destn == NULL)
++		return -1;
++
++	/** NOTE: Total bytes to copy from the received raw message is the sum of IPv6 header length and ICMPv6 header length.
++	 *	As per spec: IPv6 header length is 40 bytes. And IPv6 header contains a Payload length field indicating ICMPv6 header length
++	 *	plus optional parameters */
++	uint16_t total_bytes_to_copy = data_buf_length - sizeof(struct ip6_hdr);
++	syslog(LOG_DEBUG, "Total bytes to copy from the received raw message: %d",total_bytes_to_copy);
++
++	uint8_t data_buf_copied[total_bytes_to_copy];
++	for (int i = 0; i < total_bytes_to_copy; i++)
++	{
++		data_buf_copied[i] = data_buf[sizeof(struct ip6_hdr) + i];
++//		syslog(LOG_DEBUG, "bridge#send_ns_na: 0x%x", data_buf_copied[i]);
++	}
++
++	packet_size = sizeof(struct nd_neighbor_solicit);
++	opt_hdr = (struct nd_opt_hdr *) (data_buf + sizeof(struct ip6_hdr) + sizeof(struct nd_neighbor_solicit));
++
++	while(opt_hdr != NULL && opt_hdr->nd_opt_len != 0)
++	{
++		packet_size += (opt_hdr->nd_opt_len * 8);
++
++		if (opt_hdr->nd_opt_type == ND_OPT_SOURCE_LINKADDR ||  //for NS case
++			opt_hdr->nd_opt_type == ND_OPT_TARGET_LINKADDR)    //for NA case
++		{
++			struct ether_addr bridge_mac_addr, *target_mac_addr;
++			target_mac_addr = (struct ether_addr*) (data_buf_copied + (packet_size - 6));
++			odhcpd_get_mac(iface, (uint8_t*)&bridge_mac_addr);
++			syslog(LOG_ERR, "original options ll addr:%s", ether_ntoa(target_mac_addr));
++			syslog(LOG_ERR, "replaced with bridge MAC: %s", ether_ntoa(&bridge_mac_addr));
++			memcpy(target_mac_addr, &bridge_mac_addr, 6);
++			break;
++		}
++
++		opt_hdr = (struct nd_opt_hdr *) (opt_hdr + opt_hdr->nd_opt_len);
++	}
++	/* Construct iovector */
++	struct iovec iov = { data_buf_copied, sizeof(data_buf_copied) };
++
++	struct msghdr msg1 = {
++		.msg_name = (void *) destn,
++		.msg_namelen = sizeof(*destn),
++		.msg_iov = &iov,
++		.msg_iovlen = 1
++	};
++	inet_ntop(AF_INET6, destn, ipbuffer, sizeof(ipbuffer));
++	ssize_t sent = sendmsg(iface->ndp_ping_fd, &msg1, MSG_DONTWAIT);
++	if (sent < 0)
++	{
++		syslog(LOG_ERR, "Failed to relay NS or NA to %s%%%s@%s (%m); errno: %d(fd=%d)",
++				ipbuffer, iface->name, iface->ifname, errno, iface->ndp_ping_fd);
++		return -1;
++	}
++	else
++	{
++		syslog(LOG_DEBUG, "Sent %zd bytes to %s%%%s@%s",
++				sent, ipbuffer, iface->name, iface->ifname);
++		return 0;
++	}
++
++}
++
++/* Relay neighbor solicitation */
++static void relay_ns_na(struct interface *iface,
++			struct sockaddr_ll *ll,
++			struct ip6_hdr *ip6,
++			uint8_t *data_buf, uint64_t data_buf_length)
++{
++	char ipbuffer[INET6_ADDRSTRLEN];
++
++	/* NULL checks */
++	if (iface == NULL || ll == NULL || ip6 == NULL || (data_buf_length == 0 || data_buf == NULL))
++		return;
++
++	struct nd_neighbor_solicit *ns_header = (struct nd_neighbor_solicit *)((struct icmp6_hdr *)(ip6 + 1));
++
++	if (ns_header->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_SOLICIT)
++	{
++		struct proxy_data_info* new_proxy_item;
++
++		syslog(LOG_DEBUG, "need relay NS message");
++
++		new_proxy_item = malloc(sizeof(struct proxy_data_info));
++		new_proxy_item->dst_ipv6_addr=ns_header->nd_ns_target;
++		new_proxy_item->src_ipv6_addr=ip6->ip6_src;
++
++		struct sockaddr_in6 destn = { .sin6_family = AF_INET6, .sin6_addr = ip6->ip6_dst, .sin6_scope_id = iface->ifindex };
++
++		inet_ntop(AF_INET6, &ip6->ip6_dst, ipbuffer, sizeof(ipbuffer));
++		syslog(LOG_DEBUG, "relay NS message to %s", ipbuffer);
++
++		if(send_ns_na(iface, ll, ip6, data_buf, data_buf_length, &destn) == 0)
++		{
++			list_add(&new_proxy_item->head, &proxy_data_info_list_head);
++		}
++	}
++	else if (ns_header->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_ADVERT)
++	{
++		struct list_head *pos, *q;
++		struct proxy_data_info *entry;
++		syslog(LOG_DEBUG, "begin relay NA message");
++
++		list_for_each_safe(pos, q, &proxy_data_info_list_head) {
++			entry = list_entry(pos, struct proxy_data_info, head);
++			if (memcmp(&entry->dst_ipv6_addr, &ip6->ip6_src , sizeof(struct in6_addr)) == 0)
++			{
++				struct sockaddr_in6 destn =
++					{ 	.sin6_family = AF_INET6,
++						.sin6_addr = entry->src_ipv6_addr,
++						.sin6_scope_id = iface->ifindex
++					};
++				inet_ntop(AF_INET6, &entry->src_ipv6_addr, ipbuffer, sizeof(ipbuffer));
++				syslog(LOG_DEBUG, "relay NA message to %s", ipbuffer);
++				send_ns_na(iface, ll, ip6, data_buf, data_buf_length, &destn);
++				list_del(pos);
++				free(entry);
++			}
++		}
++
++	}
++}
++
+ /* Handle solicitations */
+ static void handle_solicit(void *addr, void *data, size_t len,
+ 		struct interface *iface, _unused void *dest)
+@@ -650,7 +798,7 @@ static void handle_solicit(void *addr, void *data, size_t len,
+ 	if (len < sizeof(*ip6) + sizeof(*req))
+ 		return; // Invalid total length
+ 
+-	if (IN6_IS_ADDR_LINKLOCAL(&req->nd_ns_target) ||
++	if ((iface->sta_bridge_mode == false && IN6_IS_ADDR_LINKLOCAL(&req->nd_ns_target)) ||
+ 			IN6_IS_ADDR_LOOPBACK(&req->nd_ns_target) ||
+ 			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
+ 		return; /* Invalid target */
+@@ -723,6 +871,50 @@ static void handle_solicit(void *addr, void *data, size_t len,
+ 		}
+ 	}
+ 
++	/* Handle STA Bridge mode situation, relay received NS to master intrfaces */
++	if(iface->ndp == MODE_RELAY && iface->sta_bridge_mode == true && !ns_is_dad)
++	{
++		//bridge case, forward the NS in case same IPv6 subnet scenario.
++		syslog(LOG_DEBUG, "bridge#handle_solicit: enter check whether the NS need forward");
++		if (iface->addr6 == NULL)
++		{
++			syslog(LOG_DEBUG, "bridge#handle_solicit: iface %s don't have IPv6 address", iface->name);
++			return;
++		}
++
++		bool isAnyAddrSame=false;
++		size_t i=0;
++
++		syslog(LOG_DEBUG, "bridge#handle_solicit: check iface %s", iface->name);
++		syslog(LOG_DEBUG, "bridge#handle_solicit: src %s",
++			inet_ntop(AF_INET6, &ip6->ip6_src, ipbuf, sizeof(ipbuf))),
++		syslog(LOG_DEBUG, "bridge#handle_solicit: dst %s",
++		inet_ntop(AF_INET6, &ip6->ip6_dst, ipbuf, sizeof(ipbuf)));
++
++		for(i=0; i<iface->addr6_len; i++)
++		{
++			syslog(LOG_DEBUG, "bridge#handle_solicit: local address %s",
++				inet_ntop(AF_INET6, &iface->addr6[i].addr.in6, ipbuf, sizeof(ipbuf)));
++
++			if (!memcmp(&ip6->ip6_src, &(iface->addr6[i].addr.in6), sizeof(ip6->ip6_src)) ||
++				!memcmp(&ip6->ip6_dst, &(iface->addr6[i].addr.in6), sizeof(ip6->ip6_dst)))
++			{
++				isAnyAddrSame=true;
++				syslog(LOG_DEBUG, "bridge#handle_solicit: neighbor message is targeted self,"
++								"no need forward for bridge");
++				break;
++			}
++		}
++
++		if (!isAnyAddrSame)
++		{
++			//if the NS/NA target is not self, then relay the message;
++			relay_ns_na(iface, addr, ip6, data, len);
++			syslog(LOG_DEBUG, "forwarding neighbor message for bridge case");
++		}
++		return;
++	}
++
+ 	/* Catch global-addressed NS and answer them manually.
+ 	 * The kernel won't answer these and cannot route them either. */
+ 	if (!IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst) &&
+diff --git a/src/odhcpd.h b/src/odhcpd.h
+index 2af209e..bd4c632 100644
+--- a/src/odhcpd.h
++++ b/src/odhcpd.h
+@@ -370,6 +370,8 @@ struct interface {
+ 	// SNTP
+ 	struct in6_addr *dhcpv6_sntp;
+ 	size_t dhcpv6_sntp_cnt;
++
++	bool sta_bridge_mode;
+ };
+ 
+ extern struct avl_tree interfaces;
+diff --git a/src/router.c b/src/router.c
+index 7f5658b..21f7d4f 100644
+--- a/src/router.c
++++ b/src/router.c
+@@ -24,6 +24,9 @@
+ #include <arpa/inet.h>
+ #include <net/route.h>
+ 
++#include <netinet/ip6.h>
++#include <netinet/icmp6.h>
++
+ #include <libubox/utils.h>
+ 
+ #include "router.h"
+@@ -440,6 +443,73 @@ struct nd_opt_pref64_info {
+ 	uint32_t addr[3];
+ };
+ 
++/*send RS with unspecified src to request RA multicast packet */
++static int send_RS_withUnspecifiedSrc(struct interface *iface, struct sockaddr_in6 *from)
++{
++	int sockfd;
++	struct sockaddr_in6 dst_addr;
++	struct ip6_hdr ip6_hdr;
++	struct icmp6_hdr icmp6_hdr;
++	char buffer[1024];
++	struct in6_addr ip6_unspecified_addr;
++
++#define SRC_ADDR "::"
++#define DST_ADDR "ff02::2"
++
++	inet_pton(AF_INET6, SRC_ADDR, &ip6_unspecified_addr);
++
++	if(memcmp(&from->sin6_addr, &ip6_unspecified_addr, sizeof(struct in6_addr)) == 0)
++	{
++		syslog(LOG_ERR, "ignore RS with unspecifed src");
++		return 0;
++	}
++
++	sockfd = socket(AF_INET6, SOCK_RAW, IPPROTO_RAW);
++	if (sockfd < 0) {
++		syslog(LOG_INFO, "create raw socket error:%m");
++		return (-1);
++	}
++
++	if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE,
++			iface->ifname, strlen(iface->ifname)) < 0) {
++		syslog(LOG_ERR, "setsockopt(SO_BINDTODEVICE): %m");
++		return -1;
++	}
++
++
++	memset(&dst_addr, 0, sizeof(dst_addr));
++	dst_addr.sin6_family = AF_INET6;
++	dst_addr.sin6_port = 0;
++	inet_pton(AF_INET6, DST_ADDR, &dst_addr.sin6_addr);
++
++	memset(&ip6_hdr, 0, sizeof(ip6_hdr));
++	ip6_hdr.ip6_flow = htonl((6 << 28) | (0 << 20) | 0);
++	ip6_hdr.ip6_plen = htons(sizeof(icmp6_hdr));
++	ip6_hdr.ip6_nxt = IPPROTO_ICMPV6;
++	ip6_hdr.ip6_hlim = 255;
++	inet_pton(AF_INET6, SRC_ADDR, &ip6_hdr.ip6_src);
++	inet_pton(AF_INET6, DST_ADDR, &ip6_hdr.ip6_dst);
++
++	memset(&icmp6_hdr, 0, sizeof(icmp6_hdr));
++	icmp6_hdr.icmp6_type = ND_ROUTER_SOLICIT;
++	icmp6_hdr.icmp6_code = 0;
++	icmp6_hdr.icmp6_cksum = 0xb87b; //hardcode validated value since we have fixed address/message
++
++	memset(buffer, 0, sizeof(buffer));
++	memcpy(buffer, &ip6_hdr, sizeof(ip6_hdr));
++	memcpy(buffer + sizeof(ip6_hdr), &icmp6_hdr, sizeof(icmp6_hdr));
++
++	if (sendto(sockfd, buffer, sizeof(ip6_hdr) + sizeof(icmp6_hdr), 0, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
++		syslog(LOG_INFO, "send to failure:%m");
++		return -1;
++	}
++
++	syslog(LOG_INFO, "send RS with unspecified src address successfully.");
++
++	close(sockfd);
++	return 0;
++}
++
+ /* Router Advert server mode */
+ static int send_router_advert(struct interface *iface, const struct in6_addr *from)
+ {
+@@ -909,6 +979,15 @@ static void handle_icmpv6(void *addr, void *data, size_t len,
+ 		if (hdr->icmp6_type == ND_ROUTER_SOLICIT)
+ 			send_router_advert(iface, &from->sin6_addr);
+ 	} else if (iface->ra == MODE_RELAY) { /* Relay mode */
++		if (iface->sta_bridge_mode)
++		{
++			if (hdr->icmp6_type == ND_ROUTER_SOLICIT)
++			{
++				syslog(LOG_DEBUG, "handle_icmpv6: forward RS for ");
++				send_RS_withUnspecifiedSrc(iface, addr);
++			}
++		}
++		else
+ 		if (hdr->icmp6_type == ND_ROUTER_SOLICIT && !iface->master) {
+ 			struct interface *c;
+ 
+@@ -918,7 +997,7 @@ static void handle_icmpv6(void *addr, void *data, size_t len,
+ 
+ 				forward_router_solicitation(c);
+ 			}
+-		} else if (hdr->icmp6_type == ND_ROUTER_ADVERT && iface->master)
++		} else if (hdr->icmp6_type == ND_ROUTER_ADVERT && (iface->master || iface->sta_bridge_mode))
+ 			forward_router_advertisement(iface, data, len);
+ 	}
+ }
+-- 
+2.41.0.windows.3
+

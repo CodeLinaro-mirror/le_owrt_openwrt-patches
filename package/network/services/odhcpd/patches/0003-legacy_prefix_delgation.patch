@@ -1,0 +1,599 @@
+From 4e68e23ce9fa0c0ef1a2a6d594cd2a2180663a11 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Fri, 15 Mar 2024 13:11:30 +0800
+Subject: [PATCH] odhcpd: add support legacy_prefix_delgation
+
+introduce new UCI option legacy_prefix_delegation_mode.
+when it is enabled,
+odhcpd will query prefix delegation by pd_manager when receive RS,
+and send delegated-prefix in RA message.
+
+Change-Id: I6fbc2a2649d2426d79d1e68c12f39b3b132ba4d3
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ src/config.c    |   5 +
+ src/dhcpv6-ia.c |  38 ++++++-
+ src/dhcpv6.c    |   1 +
+ src/odhcpd.h    |  49 +++++++++
+ src/router.c    | 273 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 364 insertions(+), 2 deletions(-)
+
+diff --git a/src/config.c b/src/config.c
+index cd9f808..a34e7c3 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -94,6 +94,7 @@ enum {
+ 	IFACE_ATTR_PREFERRED_LIFETIME,
+ 	IFACE_ATTR_NTP,
+ 	IFACE_ATTR_STA_BRIDGE_MODE,
++	IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE,
+ 	IFACE_ATTR_MAX
+ };
+ 
+@@ -148,6 +149,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
+ 	[IFACE_ATTR_PREFERRED_LIFETIME] = { .name = "preferred_lifetime", .type = BLOBMSG_TYPE_STRING },
+ 	[IFACE_ATTR_NTP] = { .name = "ntp", .type = BLOBMSG_TYPE_ARRAY },
+ 	[IFACE_ATTR_STA_BRIDGE_MODE] = { .name = "sta_bridge_mode", .type = BLOBMSG_TYPE_BOOL },
++	[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE] = { .name = "qcmap_prefix_delegation_mode", .type = BLOBMSG_TYPE_INT32 },
+ };
+ 
+ static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
+@@ -575,6 +577,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+ 		iface->ndp_fd = -1;
+ 		iface->dhcpv4_event.uloop.fd = -1;
+ 		INIT_LIST_HEAD(&iface->ia_assignments);
++		INIT_LIST_HEAD(&iface->ra_prefix_assignments);
+ 		INIT_LIST_HEAD(&iface->dhcpv4_assignments);
+ 		INIT_LIST_HEAD(&iface->dhcpv4_fr_ips);
+ 
+@@ -1103,6 +1106,8 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+ 	if ((c = tb[IFACE_ATTR_STA_BRIDGE_MODE]))
+ 		iface->sta_bridge_mode = blobmsg_get_bool(c);
+ 
++	if ((c = tb[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE]))
++		iface->qcmap_prefix_delegation_mode = blobmsg_get_u32(c);
+ 
+ 	return 0;
+ 
+diff --git a/src/dhcpv6-ia.c b/src/dhcpv6-ia.c
+index dde224d..512e1f9 100644
+--- a/src/dhcpv6-ia.c
++++ b/src/dhcpv6-ia.c
+@@ -649,6 +649,11 @@ static void managed_handle_pd_data(struct ustream *s, _unused int bytes_new)
+ 	time_t now = odhcpd_time();
+ 	bool first = c->managed_size < 0;
+ 
++    struct list_head* headoflist = NULL;
++    uint64_t new_assigned_host_id;
++    headoflist = &(c->head);
++    syslog(LOG_INFO, "managed_handle_pd_data: head 0x%x", headoflist);
++
+ 	for (;;) {
+ 		int pending;
+ 		char *data = ustream_get_read_buf(s, &pending);
+@@ -668,6 +673,7 @@ static void managed_handle_pd_data(struct ustream *s, _unused int bytes_new)
+ 		for (char *line = strtok_r(data, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
+ 			c->managed = realloc(c->managed, (c->managed_size + 1) * sizeof(*c->managed));
+ 			struct odhcpd_ipaddr *n = &c->managed[c->managed_size];
++            syslog(LOG_INFO, "managed_handle_pd_data: receive %s", line);
+ 
+ 			char *saveptr2, *x = strtok_r(line, "/", &saveptr2);
+ 			if (!x || inet_pton(AF_INET6, x, &n->addr) < 1)
+@@ -685,6 +691,10 @@ static void managed_handle_pd_data(struct ustream *s, _unused int bytes_new)
+ 			if (sscanf(x, "%u", &n->valid_lt) < 1)
+ 				continue;
+ 
++            x = strtok_r(NULL, ",", &saveptr2);
++            if (sscanf(x, "%"PRIu64, &new_assigned_host_id) < 1)
++                continue;
++
+ 			if (n->preferred_lt > n->valid_lt)
+ 				continue;
+ 
+@@ -700,6 +710,17 @@ static void managed_handle_pd_data(struct ustream *s, _unused int bytes_new)
+ 
+ 			n->dprefix = 0;
+ 
++            /* Find assignment */
++            struct dhcp_assignment *iana_a = NULL;
++            list_for_each_entry(iana_a, headoflist, head) {
++                if ((iana_a->clid_len == c->clid_len && !memcmp(iana_a->clid_data, c->clid_data, c->clid_len)) &&
++                    (INFINITE_VALID(iana_a->valid_until) || now < iana_a->valid_until) && (iana_a->flags & OAF_DHCPV6_NA)) {
++                    iana_a->assigned_host_id=new_assigned_host_id;
++                    syslog(LOG_INFO, "managed_handle_pd_data: update NA assignment 0x%x assigned_host_id=%d", iana_a, new_assigned_host_id);
++                    break;
++                }
++            }
++
+ 			++c->managed_size;
+ 		}
+ 
+@@ -730,9 +751,11 @@ static void managed_handle_pd_done(struct ustream *s)
+ static bool assign_pd(struct interface *iface, struct dhcp_assignment *assign)
+ {
+ 	struct dhcp_assignment *c;
++	syslog(LOG_INFO, "assign_pd: iface->addr6_len=%d", iface->addr6_len);
+ 
+ 	if (iface->dhcpv6_pd_manager[0]) {
+ 		int fd = usock(USOCK_UNIX | USOCK_TCP, iface->dhcpv6_pd_manager, NULL);
++		syslog(LOG_INFO, "assign_pd: open socket to %s", iface->dhcpv6_pd_manager);
+ 		if (fd >= 0) {
+ 			struct pollfd pfd = { .fd = fd, .events = POLLIN };
+ 			char iaidbuf[298];
+@@ -744,12 +767,14 @@ static bool assign_pd(struct interface *iface, struct dhcp_assignment *assign)
+ 			ustream_fd_init(&assign->managed_sock, fd);
+ 			ustream_printf(&assign->managed_sock.stream, "%s,%x\n::/%d,0,0\n\n",
+ 					iaidbuf, assign->iaid, assign->length);
++            syslog(LOG_INFO, "send %s,%x\n::/%d,0,0\n\n to pd_manager",iaidbuf, assign->iaid, assign->length);
+ 			ustream_write_pending(&assign->managed_sock.stream);
+ 			assign->managed_size = -1;
+ 
+ 			assign->valid_until = odhcpd_time() + 15;
+ 
+ 			list_add(&assign->head, &iface->ia_assignments);
++			syslog(LOG_INFO, "assign_pd: ia_assignments 0x%x", &iface->ia_assignments);
+ 
+ 			/* Wait initial period of up to 250ms for immediate assignment */
+ 			if (poll(&pfd, 1, 250) < 0) {
+@@ -1499,7 +1524,7 @@ ssize_t dhcpv6_ia_handle_IAs(uint8_t *buf, size_t buflen, struct interface *ifac
+ 			}
+ 		}
+ 
+-		if (l && a && a->lease != l) {
++		if (l && a && a->lease != l && l->duid) {
+ 			free_assignment(a);
+ 			a = NULL;
+ 		}
+@@ -1509,13 +1534,22 @@ ssize_t dhcpv6_ia_handle_IAs(uint8_t *buf, size_t buflen, struct interface *ifac
+ 		if (a && a->managed_size < 0)
+ 			return -1;
+ 
++		syslog(LOG_INFO, "dhcpv6_ia_handle_IAs: msg_type:%d", hdr->msg_type);
++
+ 		if (hdr->msg_type == DHCPV6_MSG_SOLICIT ||
+ 				hdr->msg_type == DHCPV6_MSG_REQUEST ||
+ 				(hdr->msg_type == DHCPV6_MSG_REBIND && !a)) {
+ 			bool assigned = !!a;
+ 
++			syslog(LOG_INFO, "dhcpv6_ia_handle_IAs: a:%x, iface->no_dynamic_dhcp:%d, is_na:%d, iface->dhcpv6_pd:%d, iface->dhcpv6_na:%d", a, iface->no_dynamic_dhcp, is_na, iface->dhcpv6_pd, iface->dhcpv6_na);
++			if (iface->qcmap_prefix_delegation_mode == QCMAP_PREFIX_DELEGATION_MODE_LEGACY)
++			{
++				syslog(LOG_INFO, "dhcpv6_ia_handle_IAs: ignore DHCPv6 message since in IDU Prefix Delegation Mode");
++				return -1;
++			}
++
+ 			if (!a) {
+-				if ((!iface->no_dynamic_dhcp || (l && is_na)) &&
++				if ((!iface->no_dynamic_dhcp || (l && is_na) || iface->qcmap_prefix_delegation_mode) &&
+ 				    (iface->dhcpv6_pd || iface->dhcpv6_na)) {
+ 					/* Create new binding */
+ 					a = alloc_assignment(clid_len);
+diff --git a/src/dhcpv6.c b/src/dhcpv6.c
+index 58b7d9f..6e127cd 100644
+--- a/src/dhcpv6.c
++++ b/src/dhcpv6.c
+@@ -635,6 +635,7 @@ static void handle_client_request(void *addr, void *data, size_t len,
+ 	} else
+ #endif	/* DHCPV4_SUPPORT */
+ 	if (hdr->msg_type != DHCPV6_MSG_INFORMATION_REQUEST) {
++		syslog(LOG_INFO, "call dhcpv6_ia_handle_IAs:");
+ 		ssize_t ialen = dhcpv6_ia_handle_IAs(pdbuf, sizeof(pdbuf), iface, addr, (const void *)hdr, opts_end);
+ 
+ 		iov[IOV_PDBUF].iov_len = ialen;
+diff --git a/src/odhcpd.h b/src/odhcpd.h
+index bd4c632..c894aa2 100644
+--- a/src/odhcpd.h
++++ b/src/odhcpd.h
+@@ -50,6 +50,10 @@
+ #define NTP_SUBOPTION_SRV_FQDN 3
+ #define IPV6_ADDR_LEN 16
+ 
++#define QCMAP_PREFIX_DELEGATION_MODE_LEGACY 1
++#define QCMAP_PREFIX_DELEGATION_MODE_IDU 2
++
++
+ #define IN6_IS_ADDR_ULA(a) (((a)->s6_addr32[0] & htonl(0xfe000000)) == htonl(0xfc000000))
+ 
+ #define ADDR_MATCH_PIO_FILTER(_addr, iface) (odhcpd_bmemcmp(&(_addr)->addr, \
+@@ -195,6 +199,20 @@ enum {
+ 
+ struct odhcpd_ref_ip;
+ 
++struct ra_prefix_assignment {
++	struct list_head head;
++
++	struct interface *iface;
++	struct in6_addr from;
++
++	struct odhcpd_ipaddr* managed;
++	ssize_t managed_size;
++	struct ustream_fd managed_sock;
++
++	time_t valid_until;
++	time_t preferred_until;
++};
++
+ struct dhcp_assignment {
+ 	struct list_head head;
+ 	struct list_head lease_list;
+@@ -264,6 +282,9 @@ struct interface {
+ 	struct odhcpd_event dhcpv6_event;
+ 	struct list_head ia_assignments;
+ 
++	// Legacy Prefix Delegation runtime data
++	struct list_head ra_prefix_assignments;
++
+ 	// NDP runtime data
+ 	struct odhcpd_event ndp_event;
+ 	int ndp_ping_fd;
+@@ -372,6 +393,12 @@ struct interface {
+ 	size_t dhcpv6_sntp_cnt;
+ 
+ 	bool sta_bridge_mode;
++
++	// Legacy Prefix Delegation,
++	// 1: Legacy Prefix Delegation, use RS/RA for prefix delegation
++	// 2: IDU Prefix Delegation, use DHCPv6/Prefix-Delegation
++	uint32_t qcmap_prefix_delegation_mode;
++
+ };
+ 
+ extern struct avl_tree interfaces;
+@@ -390,6 +417,28 @@ inline static void free_assignment(struct dhcp_assignment *a)
+ 	free(a);
+ }
+ 
++inline static void free_ra_prefix_assignment(struct ra_prefix_assignment *a)
++{
++	list_del(&a->head);
++	if(a->managed) {
++		free(a->managed);
++		a->managed = NULL;
++	}
++	free(a);
++}
++
++inline static struct ra_prefix_assignment *alloc_ra_prefix_assignment()
++{
++	struct ra_prefix_assignment *a = calloc(1, sizeof(*a) );
++
++	if (!a)
++		return NULL;
++
++	INIT_LIST_HEAD(&a->head);
++
++	return a;
++}
++
+ inline static struct dhcp_assignment *alloc_assignment(size_t extra_len)
+ {
+ 	struct dhcp_assignment *a = calloc(1, sizeof(*a) + extra_len);
+diff --git a/src/router.c b/src/router.c
+index 21f7d4f..bbeb003 100644
+--- a/src/router.c
++++ b/src/router.c
+@@ -32,6 +32,8 @@
+ #include "router.h"
+ #include "odhcpd.h"
+ 
++#include <poll.h>
++#include <libubox/usock.h>
+ 
+ static void forward_router_solicitation(const struct interface *iface);
+ static void forward_router_advertisement(const struct interface *iface, uint8_t *data, size_t len);
+@@ -47,6 +49,7 @@ static FILE *fp_route = NULL;
+ 
+ 
+ #define TIME_LEFT(t1, now) ((t1) != UINT32_MAX ? (t1) - (now) : UINT32_MAX)
++#define INVALID_TIME_VALUE 2
+ 
+ int router_init(void)
+ {
+@@ -180,6 +183,7 @@ int router_setup_interface(struct interface *iface, bool enable)
+ 
+ 			iface->router_event.handle_dgram = handle_icmpv6;
+ 			iface->ra_sent = 0;
++			syslog(LOG_ERR, "odhcpd_register for iface %s", iface->ifname);
+ 			odhcpd_register(&iface->router_event);
+ 		} else {
+ 			uloop_timeout_cancel(&iface->timer_rs);
+@@ -510,6 +514,214 @@ static int send_RS_withUnspecifiedSrc(struct interface *iface, struct sockaddr_i
+ 	return 0;
+ }
+ 
++/* More data was received from TCP connection */
++static void router_managed_handle_pd_data(struct ustream *s, _unused int bytes_new)
++{
++	struct ustream_fd *fd = container_of(s, struct ustream_fd, stream);
++	struct ra_prefix_assignment *c = container_of(fd, struct ra_prefix_assignment, managed_sock);
++	time_t now = odhcpd_time();
++	bool first = c->managed_size < 0;
++
++	for (;;) {
++		int pending;
++		char *data = ustream_get_read_buf(s, &pending);
++		char *end = memmem(data, pending, "\n\n", 2);
++
++		if(data != 0)
++		{
++			syslog(LOG_INFO, "router_managed_handle_pd_data: receive %s(pending:%d, new:%d)", data, pending, bytes_new);
++		}
++		else
++		{
++			syslog(LOG_INFO, "router_managed_handle_pd_data: not receive data(pending:%d, new:%d)", pending, bytes_new);
++		}
++
++		if (!end)
++		{
++			syslog(LOG_INFO, "router_managed_handle_pd_data: end break");
++			break;
++		}
++
++		end += 2;
++		end[-1] = 0;
++
++		c->managed_size = 0;
++
++		char *saveptr;
++		for (char *line = strtok_r(data, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
++			c->managed = realloc(c->managed, (c->managed_size + 1) * sizeof(*c->managed));
++			struct odhcpd_ipaddr *n = &c->managed[c->managed_size];
++
++			syslog(LOG_INFO, "router_managed_handle_pd_data: receive %s(%d)", line, bytes_new);
++
++			char *saveptr2, *x = strtok_r(line, "/", &saveptr2);
++			if (!x || inet_pton(AF_INET6, x, &n->addr) < 1)
++				continue;
++
++			x = strtok_r(NULL, ",", &saveptr2);
++			if (sscanf(x, "%hhu", &n->prefix) < 1)
++				continue;
++
++			x = strtok_r(NULL, ",", &saveptr2);
++			if (sscanf(x, "%u", &n->preferred_lt) < 1)
++				continue;
++
++			x = strtok_r(NULL, ",", &saveptr2);
++			if (sscanf(x, "%u", &n->valid_lt) < 1)
++				continue;
++
++			if (n->preferred_lt > n->valid_lt)
++				continue;
++
++			if (UINT32_MAX - now < n->preferred_lt)
++				n->preferred_lt = UINT32_MAX;
++			else
++				n->preferred_lt += now;
++
++			if (UINT32_MAX - now < n->valid_lt)
++				n->valid_lt = UINT32_MAX;
++			else
++				n->valid_lt += now;
++
++			n->dprefix = 0;
++
++			++c->managed_size;
++		}
++
++		ustream_consume(s, end - data);
++	}
++
++	if (first && c->managed_size == 0)
++		free_ra_prefix_assignment(c);
++	else if (first)
++		c->valid_until = now + 150;
++}
++
++
++static void router_managed_handle_pd_write_done(struct ustream *s, int bytes)
++{
++	syslog(LOG_INFO, "router_managed_handle_pd_write_done: send success (num: %d)", bytes);
++}
++
++static int send_router_advert(struct interface *iface, const struct in6_addr *from);
++
++static void __router_apply_lease(struct ra_prefix_assignment *a,
++		struct odhcpd_ipaddr *addrs, ssize_t addr_len, bool add)
++{
++	for (ssize_t i = 0; i < addr_len; ++i) {
++		struct in6_addr prefix;
++
++		if (ADDR_MATCH_PIO_FILTER(&addrs[i], a->iface))
++			continue;
++
++		prefix = addrs[i].addr.in6;
++		prefix.s6_addr32[1] |= htonl(0);
++		prefix.s6_addr32[2] = prefix.s6_addr32[3] = 0;
++		netlink_setup_route(&prefix, (a->managed_size) ? addrs[i].prefix : 64,
++				a->iface->ifindex, NULL, 1024, add);
++	}
++}
++
++static void router_apply_lease(struct ra_prefix_assignment *a, bool add)
++{
++	struct interface *iface = a->iface;
++	struct odhcpd_ipaddr *addrs = (a->managed) ? a->managed : iface->addr6;
++	ssize_t addrlen = (a->managed) ? a->managed_size : (ssize_t)iface->addr6_len;
++
++	__router_apply_lease(a, addrs, addrlen, add);
++}
++
++/* TCP transmission has ended, either because of success or timeout or other error */
++static void router_managed_handle_pd_done(struct ustream *s)
++{
++	struct ustream_fd *fd = container_of(s, struct ustream_fd, stream);
++	struct ra_prefix_assignment *c = container_of(fd, struct ra_prefix_assignment, managed_sock);
++
++	syslog(LOG_INFO, "router_managed_handle_pd_done: send RA with lifetime 0");
++
++	if(c && c->managed)
++	{
++		c->managed->preferred_lt=1;
++		c->managed->valid_lt=INVALID_TIME_VALUE; //mark as invalid time value
++		//send RA with lifetime=0
++		send_router_advert(c->iface, &(c->from));
++		router_apply_lease(c, false);
++
++		//free the assignment
++		free_ra_prefix_assignment(c);
++	}
++}
++
++static struct ra_prefix_assignment* router_get_delegation_prefix
++(struct interface *iface, const struct in6_addr *from)
++{
++	struct ra_prefix_assignment *c, *a = NULL;
++	if(from == NULL)
++		return NULL;
++
++	//find assignment
++	list_for_each_entry(c, &iface->ra_prefix_assignments, head) {
++		if (!memcmp(&(c->from), from, sizeof(struct in6_addr))) {
++			a = c;
++			syslog(LOG_INFO, "router_get_delegation_prefix: get prefix ready");
++			break;
++		}
++	}
++
++	if(a != NULL)
++		return a;
++
++	// allocate new assignment and trigger new request
++	a = alloc_ra_prefix_assignment();
++	if (!a)
++		return NULL;
++
++	memcpy(&(a->from), from, sizeof(struct in6_addr));
++	a->iface=iface;
++
++	if (iface->dhcpv6_pd_manager[0]) {
++		int fd = usock(USOCK_UNIX | USOCK_TCP, iface->dhcpv6_pd_manager, NULL);
++
++		syslog(LOG_INFO, "router_get_delegation_prefix: open socket to %s", iface->dhcpv6_pd_manager);
++		if (fd >= 0) {
++			struct pollfd pfd = { .fd = fd, .events = POLLIN };
++			char iaidbuf[17] = {0};
++
++			odhcpd_hexlify(iaidbuf, from->s6_addr + 8, 8);
++
++			a->managed_sock.stream.notify_read = router_managed_handle_pd_data;
++			a->managed_sock.stream.notify_state = router_managed_handle_pd_done;
++			a->managed_sock.stream.notify_write = router_managed_handle_pd_write_done;
++			ustream_fd_init(&a->managed_sock, fd);
++			ustream_printf(&a->managed_sock.stream, "%s,%x\n::/%d,0,0\n\n",
++							iaidbuf, 0, 64);
++			syslog(LOG_INFO, "send %s,%x\n::/%d,0,0\n\n to pd_manager",iaidbuf, 0, 64);
++			ustream_write_pending(&a->managed_sock.stream);
++
++			a->valid_until = odhcpd_time() + 15;
++
++			list_add(&a->head, &iface->ra_prefix_assignments);
++
++			/* Wait initial period of up to 250ms for immediate assignment */
++			if (poll(&pfd, 1, 250) < 0) {
++				syslog(LOG_ERR, "poll(): %m");
++				return NULL;
++			}
++
++			router_managed_handle_pd_data(&a->managed_sock.stream, 0);
++
++			if (fcntl(fd, F_GETFL) >= 0 && a->managed_size > 0)
++				return a;
++		}
++
++		return NULL;
++	}
++	else
++		return NULL;
++
++}
++
++
+ /* Router Advert server mode */
+ static int send_router_advert(struct interface *iface, const struct in6_addr *from)
+ {
+@@ -575,6 +787,8 @@ static int send_router_advert(struct interface *iface, const struct in6_addr *fr
+ 	iov[IOV_RA_ADV].iov_base = (char *)&adv;
+ 	iov[IOV_RA_ADV].iov_len = sizeof(adv);
+ 
++	if(iface->qcmap_prefix_delegation_mode != QCMAP_PREFIX_DELEGATION_MODE_LEGACY)
++	{
+ 	valid_addr_cnt = (iface->timer_rs.cb /* if not shutdown */ ? iface->addr6_len : 0);
+ 	invalid_addr_cnt = iface->invalid_addr6_len;
+ 
+@@ -624,6 +838,52 @@ static int send_router_advert(struct interface *iface, const struct in6_addr *fr
+ 			}
+ 		}
+ 	}
++	}
++	else
++	{
++		struct ra_prefix_assignment *a = NULL;
++		if(from == NULL)
++			return 1000*1000;
++
++		if((a = router_get_delegation_prefix(iface, from)))
++		{
++			if(a->managed == NULL)
++			{
++				syslog(LOG_INFO, "prefix not yet ready, need wait");
++				return 0;
++			}
++			if(a->managed->valid_lt == INVALID_TIME_VALUE)
++			{
++				valid_addr_cnt = 0;
++				invalid_addr_cnt = a->managed_size;
++			}
++			else
++			{
++				valid_addr_cnt = a->managed_size;
++				invalid_addr_cnt = 0;
++			}
++			addrs = alloca(sizeof(*addrs) * (valid_addr_cnt + invalid_addr_cnt));
++			syslog(LOG_INFO, "LegacyPrefix got %d prefix", a->managed_size);
++			router_apply_lease(a, true);
++
++			memcpy(addrs, a->managed, sizeof(*addrs) * a->managed_size);
++			if (valid_addr_cnt) {
++				/* Check default route */
++				if (iface->default_router) {
++					default_route = true;
++
++				if (iface->default_router > 1)
++					valid_prefix = true;
++				} else if (parse_routes(addrs, valid_addr_cnt))
++					default_route = true;
++			}
++		}
++		else
++		{
++			syslog(LOG_INFO, "prefix not yet ready, skip this RA");
++			return 0;
++		}
++	}
+ 
+ 	/* Construct Prefix Information options */
+ 	for (ssize_t i = 0; i < valid_addr_cnt + invalid_addr_cnt; ++i) {
+@@ -959,6 +1219,19 @@ static void trigger_router_advert(struct uloop_timeout *event)
+ 	struct interface *iface = container_of(event, struct interface, timer_rs);
+ 	int msecs = send_router_advert(iface, NULL);
+ 
++	if(iface->qcmap_prefix_delegation_mode == QCMAP_PREFIX_DELEGATION_MODE_LEGACY)
++	{
++		struct ra_prefix_assignment *c = NULL;
++		//find assignment
++		list_for_each_entry(c, &iface->ra_prefix_assignments, head) {
++			msecs = send_router_advert(iface, &(c->from));
++			syslog(LOG_INFO, "trigger_router_advert: for legacy prefix delegation");
++		}
++		//in case Prefix not ready, don't add new timer
++		if(msecs == 0)
++			return;
++	}
++
+ 	/* Rearm timer if not shut down */
+ 	if (event->cb)
+ 		uloop_timeout_set(event, msecs);
+-- 
+2.41.0.windows.3
+
