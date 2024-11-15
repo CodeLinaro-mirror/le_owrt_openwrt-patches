@@ -1,0 +1,44 @@
+From a88f04ea674c2607bcb50d96f4d1df98d5474642 Mon Sep 17 00:00:00 2001
+From: Radhika Bandichhode <quic_rbandich@quicinc.com>
+Date: Fri, 19 Jan 2024 11:17:16 +0530
+Subject: [PATCH] graceful shutdown
+Signed-off-by: Prashanth K <quic_pkommu@quicinc.com>
+---
+ init/halt.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/init/halt.c b/init/halt.c
+index 7aea8cfec..5e3257ec0 100644
+--- a/init/halt.c
++++ b/init/halt.c
+@@ -173,6 +173,9 @@ int halt_main(int argc UNUSED_PARAM, char **argv)
+ 
+ 	int delay = 0;
+ 	int which, flags, rc;
++	FILE *cookie_ptr;
++	char *cookie;
++
+ 
+ 	/* Figure out which applet we're running */
+ 	if (ENABLE_HALT && !ENABLE_POWEROFF && !ENABLE_REBOOT)
+@@ -222,6 +225,16 @@ int halt_main(int argc UNUSED_PARAM, char **argv)
+ 			/* talk to init */
+ 			if (!ENABLE_FEATURE_CALL_TELINIT) {
+ 				/* bbox init assumed */
++				if (argc == 1)
++                                         cookie =argv[0];
++                                else
++                                        cookie = argv[1];
++
++                                cookie_ptr = fopen("/etc/cookie.txt", "w");
++                                if (cookie_ptr != NULL) {
++                                fprintf(cookie_ptr, "%s", cookie);
++                                fclose(cookie_ptr);
++                                }
+ 				rc = kill(1, signals[which]);
+ 				if (init_was_not_there())
+ 					rc = kill(1, signals[which]);
+-- 
+2.17.1
+
+

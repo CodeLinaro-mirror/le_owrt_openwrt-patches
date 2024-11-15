@@ -1,0 +1,131 @@
+From 8def3792b1e51105b6e1074445f219603c83ff9e Mon Sep 17 00:00:00 2001
+From: Prashanth K <quic_pkommu@quicinc.com>
+Date: Fri, 18 Oct 2024 09:13:24 +0530
+Subject: [PATCH] procd: graceful shutdown reboot edl,reboot bootloader and
+ recovery
+Signed-off-by: Prashanth K <quic_pkommu@quicinc.com>
+---
+ procd.h  |  3 +++
+ signal.c | 25 ++++++++++++++++++++++---
+ state.c  | 26 +++++++++++++++++++++++---
+ 3 files changed, 48 insertions(+), 6 deletions(-)
+
+diff --git a/procd.h b/procd.h
+index bca3c42..5da4b95 100644
+--- a/procd.h
++++ b/procd.h
+@@ -22,6 +22,9 @@
+ 
+ #include <stdio.h>
+ #include <syslog.h>
++#define MODE_bootloader 0x1
++#define MODE_edl       0x2
++#define MODE_recovery 0x3
+ 
+ #include "log.h"
+ 
+diff --git a/signal.c b/signal.c
+index 9974153..6573f6c 100644
+--- a/signal.c
++++ b/signal.c
+@@ -14,10 +14,10 @@
+ 
+ #include <sys/reboot.h>
+ #include <sys/types.h>
+-
+ #include <unistd.h>
+ 
+ #include "procd.h"
++#define cookie_file "/etc/cookie.txt"
+ 
+ static void do_reboot(void)
+ {
+@@ -34,13 +34,32 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
+ {
+ 	int event = 0;
+ 	char *msg = NULL;
++	FILE *cookie_ptr;
++	char cookie[20];
+ 
+ #ifndef DISABLE_INIT
+ 	switch(signal) {
+ 	case SIGINT:
+ 	case SIGTERM:
+-		event = RB_AUTOBOOT;
+-		msg = "reboot";
++		cookie_ptr = fopen(cookie_file, "r");
++		if (cookie_ptr != NULL) {
++		fscanf(cookie_ptr, "%s", cookie);
++		fclose(cookie_ptr);
++		}
++		if (strcmp(cookie, "edl") == 0){
++			event = MODE_edl;
++			msg = "reboot edl";
++		} else if (strcmp(cookie, "bootloader") == 0) {
++			event = MODE_bootloader;
++			msg = "reboot bootloader";
++		} else if (strcmp(cookie, "recovery") == 0){
++			event = MODE_recovery;
++			msg = " reboot recovery";
++		}
++		else {
++			event = RB_AUTOBOOT;
++			msg = "reboot";
++		}
+ 		break;
+ 	case SIGUSR1:
+ 	case SIGUSR2:
+diff --git a/state.c b/state.c
+index fb81248..ed16743 100644
+--- a/state.c
++++ b/state.c
+@@ -20,6 +20,8 @@
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <signal.h>
++#include <linux/reboot.h>
++#include <sys/syscall.h>
+ 
+ #include "container.h"
+ #include "procd.h"
+@@ -106,16 +108,34 @@ static void perform_halt()
+ 	sleep(1);
+ 
+ 	if (is_container()) {
+-		reboot(reboot_event);
++		if(reboot_event == MODE_edl){
++			syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "edl");
++		}else if(reboot_event == MODE_bootloader){
++			syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "bootloader");
++		}else if(reboot_event == MODE_recovery){
++			syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "recovery");
++		}
++		else{
++			reboot(reboot_event);
++		}
+ 		exit(EXIT_SUCCESS);
+-		return;
++	        return;
+ 	}
+ 
+ 	/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
+ 	 * in linux/kernel/sys.c, which can cause the machine to panic when
+ 	 * the init process exits... */
+ 	if (!vfork()) { /* child */
+-		reboot(reboot_event);
++		if(reboot_event == MODE_edl){
++                        syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "edl");
++                }else if(reboot_event == MODE_bootloader){
++                        syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "bootloader");
++                }else if(reboot_event == MODE_recovery){
++                        syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,LINUX_REBOOT_CMD_RESTART2, "recovery");
++                }
++                else{
++                        reboot(reboot_event);
++                }
+ 		_exit(EXIT_SUCCESS);
+ 	}
+ 
+-- 
+2.25.1
+
