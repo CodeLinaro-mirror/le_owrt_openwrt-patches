@@ -1,19 +1,18 @@
-From 40699d95ed4e7444a500c441f5b29b144a359261 Mon Sep 17 00:00:00 2001
-From: Dheeraj Kumar <quic_dhekum@quicinc.com>
-Date: Wed, 27 Sep 2023 19:27:03 +0530
-Subject: [PATCH] netifd fix for ezmesh option network backhaul issue
+From 6c08ffa86ce806833fd342c7ad48f14c75ab9f23 Mon Sep 17 00:00:00 2001
+From: ayukuma <quic_ayukuma@quicinc.com>
+Date: Tue, 19 Nov 2024 12:30:07 +0530
+Subject: [PATCH] netifd-fix-for-ezmesh-option-network-backhaul-issue.patch-02
 
-Signed-off by: Aslam Basha Mahammad (amahamma)
-
+Signed-off by: Ayush Kumar <quic_ayukuma@quicinc.com>
 ---
  device.c | 34 ++++++++++++++++++++++++++++++++--
  1 file changed, 32 insertions(+), 2 deletions(-)
 
 diff --git a/device.c b/device.c
-index c719f6f..f6c507a 100644
+index b2663ec..acab1f7 100644
 --- a/device.c
 +++ b/device.c
-@@ -655,8 +655,38 @@ static struct device *
+@@ -826,8 +826,38 @@ static struct device *
  device_create_default(const char *name, bool external)
  {
  	struct device *dev;
@@ -53,7 +52,7 @@ index c719f6f..f6c507a 100644
 +        if (!external && system_if_force_external(name) && !is_ezmesh_enabled)
  		return NULL;
  
- 	D(DEVICE, "Create simple device '%s'\n", name);
+ 	D(DEVICE, "Create simple device '%s'", name);
 -- 
-2.7.4
+2.17.1
 

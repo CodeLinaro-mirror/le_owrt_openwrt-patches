@@ -1,15 +1,15 @@
-From cf6397525ef60dffab0c7b68a0d37eb6e9d87582 Mon Sep 17 00:00:00 2001
-From: Dheeraj Kumar <quic_dhekum@quicinc.com>
-Date: Sat, 5 Oct 2024 20:18:34 +0530
-Subject: [PATCH] netifd-fix-issues-on-ifindex
+From 7f0b0d81603d03ded2e063a24860d979dd9557bd Mon Sep 17 00:00:00 2001
+From: ayukuma <quic_ayukuma@quicinc.com>
+Date: Wed, 20 Nov 2024 16:19:52 +0530
+Subject: [PATCH] netifd-fix-issues-on-ifindex-02
 
-Signed-off by: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Signed-off by: Ayush Kumar <quic_ayukuma@quicinc.com>
 ---
  bridge.c       | 16 ++++++++++++++++
- device.c       | 39 ++++++++++++++++++++++++++++++++++++---
- device.h       |  3 ++-
+ device.c       | 41 ++++++++++++++++++++++++++++++++++++-----
+ device.h       |  5 +++--
  system-linux.c | 49 +++++++++++++++++++++++++++++++++++++------------
- 4 files changed, 91 insertions(+), 16 deletions(-)
+ 4 files changed, 92 insertions(+), 19 deletions(-)
 
 diff --git a/bridge.c b/bridge.c
 index 2128ec7..dca7036 100644
@@ -39,7 +39,7 @@ index 2128ec7..dca7036 100644
  		if (bridge_enable_member(bm))
  			break;
 diff --git a/device.c b/device.c
-index 322e009..b2663ec 100644
+index 0ec3409..d89753a 100644
 --- a/device.c
 +++ b/device.c
 @@ -153,10 +153,27 @@ void device_stp_init(void)
@@ -70,11 +70,12 @@ index 322e009..b2663ec 100644
  		if (!dev->ifindex)
  			return -1;
  
-@@ -166,9 +183,17 @@ static int set_device_state(struct device *dev, bool state)
+@@ -166,12 +183,18 @@ static int set_device_state(struct device *dev, bool state)
  		dev->orig_settings.flags &= dev->settings.flags;
  		system_if_apply_settings(dev, &dev->settings, dev->settings.flags);
  
--		system_if_up(dev);
+-		if (!dev->external)
+-			system_if_up(dev);
 +		ret = system_if_up(dev);
 +		while(ret < 0 && retry <=4 )
 +		{
@@ -88,18 +89,20 @@ index 322e009..b2663ec 100644
 -		system_if_apply_settings_after_up(dev, &dev->settings);
 +		//system_if_apply_settings_after_up(dev, &dev->settings);
  	} else {
- 		system_if_down(dev);
+-		if (!dev->external)
+ 			system_if_down(dev);
  		system_if_apply_settings(dev, &dev->orig_settings, dev->orig_settings.flags);
-@@ -943,7 +968,7 @@ device_set_auth_status(struct device *dev, bool value, struct blob_attr *vlans)
+ 
+@@ -961,7 +984,7 @@ device_set_auth_status(struct device *dev, bool value, struct blob_attr *vlans)
  	device_broadcast_event(dev, DEV_EVENT_LINK_UP);
  }
  
--void device_set_present(struct device *dev, bool state)
+-void _device_set_present(struct device *dev, bool state)
 +void device_set_present_private(struct device *dev, bool state)
  {
  	if (dev->sys_present == state)
  		return;
-@@ -1441,5 +1466,13 @@ void device_hotplug_event(const char *name, bool add)
+@@ -1454,5 +1477,13 @@ void device_hotplug_event(const char *name, bool add)
  	if (!dev || dev->type != &simple_device_type)
  		return;
  
@@ -114,24 +117,32 @@ index 322e009..b2663ec 100644
  	device_set_present(dev, add);
  }
 diff --git a/device.h b/device.h
-index b2ea0fa..dd9bdcb 100644
+index 1c01b58..3db597f 100644
 --- a/device.h
 +++ b/device.h
-@@ -367,7 +367,8 @@ void device_add_user(struct device_user *dep, struct device *dev);
- void device_remove_user(struct device_user *dep);
- void device_broadcast_event(struct device *dev, enum device_event ev);
+@@ -375,14 +375,15 @@ void __device_broadcast_event(struct device *dev, enum device_event ev);
+ 	__device_broadcast_event(__ev_dev, ev);					\
+ } while (0)
  
--void device_set_present(struct device *dev, bool state);
+-void _device_set_present(struct device *dev, bool state);
 +void device_set_present_private(struct device *dev, bool state);
-+#define device_set_present(dev, state) { netifd_log_message(L_DEBUG, "call device_set_present from %s,line %d\n",  __func__, __LINE__); device_set_present_private(dev, state);}
+ #define device_set_present(dev, state) do {					\
+ 	struct device *__ev_dev = (dev);					\
+ 	bool __ev_state = state;						\
+ 	D(DEVICE, "%s: set present=%d",						\
+ 	  (__ev_dev && __ev_dev->ifname[0] ? __ev_dev->ifname : "(none)"),	\
+ 	  __ev_state);								\
+-	_device_set_present(__ev_dev, __ev_state);				\
++        netifd_log_message(L_DEBUG, "call device_set_present from %s,line %d\n",  __func__, __LINE__); \
++	device_set_present_private(__ev_dev, __ev_state);				\
+ } while (0)
+ 
  void device_set_link(struct device *dev, bool state);
- void device_set_ifindex(struct device *dev, int ifindex);
- int device_set_ifname(struct device *dev, const char *name);
 diff --git a/system-linux.c b/system-linux.c
-index 178f9a0..2a8193b 100644
+index 4463a2a..0341203 100644
 --- a/system-linux.c
 +++ b/system-linux.c
-@@ -723,8 +723,10 @@ system_device_update_state(struct device *dev, unsigned int flags, unsigned int
+@@ -717,8 +717,10 @@ system_device_update_state(struct device *dev, unsigned int flags, unsigned int
  static int cb_rtnl_event(struct nl_msg *msg, void *arg)
  {
  	struct nlmsghdr *nh = nlmsg_hdr(msg);
@@ -143,7 +154,7 @@ index 178f9a0..2a8193b 100644
  	struct device *dev;
  
  	if (nh->nlmsg_type != RTM_NEWLINK)
-@@ -738,7 +740,15 @@ static int cb_rtnl_event(struct nl_msg *msg, void *arg)
+@@ -732,7 +734,15 @@ static int cb_rtnl_event(struct nl_msg *msg, void *arg)
  	if (!dev)
  		return 0;
  
@@ -160,7 +171,7 @@ index 178f9a0..2a8193b 100644
  	return 0;
  }
  
-@@ -749,7 +759,12 @@ handle_hotplug_msg(char *data, int size)
+@@ -743,7 +753,12 @@ handle_hotplug_msg(char *data, int size)
  	char *cur, *end, *sep;
  	int skip;
  	bool add;
@@ -173,7 +184,7 @@ index 178f9a0..2a8193b 100644
  	if (!strncmp(data, "add@", 4) || !strncmp(data, "move@", 5))
  		add = true;
  	else if (!strncmp(data, "remove@", 7))
-@@ -762,6 +777,9 @@ handle_hotplug_msg(char *data, int size)
+@@ -756,6 +771,9 @@ handle_hotplug_msg(char *data, int size)
  
  	for (cur = data + skip; cur < end; cur += skip) {
  		skip = strlen(cur) + 1;
@@ -183,7 +194,7 @@ index 178f9a0..2a8193b 100644
  
  		sep = strchr(cur, '=');
  		if (!sep)
-@@ -784,9 +802,12 @@ handle_hotplug_msg(char *data, int size)
+@@ -778,9 +796,12 @@ handle_hotplug_msg(char *data, int size)
  	if (!subsystem || !interface)
  		return;
  
@@ -197,7 +208,7 @@ index 178f9a0..2a8193b 100644
  	device_hotplug_event(interface, add);
  }
  
-@@ -953,19 +974,23 @@ int system_bridge_addif(struct device *bridge, struct device *dev)
+@@ -947,19 +968,23 @@ int system_bridge_addif(struct device *bridge, struct device *dev)
  	int tries = 0;
  	int ret;
  

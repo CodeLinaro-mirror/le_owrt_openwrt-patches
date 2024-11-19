@@ -1,9 +1,9 @@
-From da190f8256989300546ac7c0326ec3190e737881 Mon Sep 17 00:00:00 2001
-From: Dheeraj Kumar <quic_dhekum@quicinc.com>
-Date: Fri, 4 Oct 2024 16:12:42 +0530
-Subject: [PATCH] 0001-debug_log-2
+From cecc8da1bb3c2c4cd9b6dc6a757b8a53b3eb4ded Mon Sep 17 00:00:00 2001
+From: ayukuma <quic_ayukuma@quicinc.com>
+Date: Wed, 20 Nov 2024 16:51:16 +0530
+Subject: [PATCH] debug_log-2
 
-Signed-off by: Dheeraj Kumar <quic_dhekum@quicinc.com>
+Signed-off by: Ayush Kumar <quic_ayukuma@quicinc.com>
 ---
  netifd.h | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
