@@ -1,0 +1,27 @@
+From 330c3af9d4805fecef793697c97ea31483bc78d8 Mon Sep 17 00:00:00 2001
+From: Bulbul Dabi <quic_bdabi@quicinc.com>
+Date: Thu, 9 Nov 2023 16:08:41 +0530
+Subject: [PATCH 1/1] Provide permissions for wlan user and group
+
+Signed-off-by: Bulbul Dabi <quic_bdabi@quicinc.com>
+---
+ ubusd_acl.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/ubusd_acl.c b/ubusd_acl.c
+index a741289..9e15ff8 100644
+--- a/ubusd_acl.c
++++ b/ubusd_acl.c
+@@ -94,7 +94,8 @@ ubusd_acl_check(struct ubus_client *cl, const char *obj,
+ 	int match_len = 0;
+ 
+ 	/* Allow system users to call ubus APIs from procd service*/
+-	if (!cl || !cl->uid || !obj || (cl->uid == 1000 && cl->gid == 1000) || (cl->uid == 1001 && cl->gid == 1001))
++	if (!cl || !cl->uid || !obj || (cl->uid == 1000 && cl->gid == 1000) || (cl->uid == 1001 && cl->gid == 1001)
++		|| (cl->uid == 1010 && cl->gid ==1010))
+ 		return 0;
+ 
+ 	/*
+-- 
+2.7.4
+
