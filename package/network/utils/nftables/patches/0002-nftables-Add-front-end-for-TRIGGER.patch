@@ -1,0 +1,775 @@
+From 1bd450a4057fc950ad08c05842b5a48eeae390ab Mon Sep 17 00:00:00 2001
+From: Yinxin Sun <quic_yinxsun@quicinc.com>
+Date: Fri, 29 Nov 2024 10:13:09 +0800
+Subject: [PATCH] nftables: Add front-end for TRIGGER
+
+Translate arguments from iptables to nftables.
+Add the ability for nftables to deal with kernel TRIGGER module
+
+Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
+---
+ include/json.h                      |  2 +
+ include/linux/netfilter/nf_tables.h | 26 +++++++++
+ include/parser.h                    |  1 +
+ include/rule.h                      |  2 +
+ include/statement.h                 | 23 ++++++++
+ src/evaluate.c                      | 64 +++++++++++++++++++++
+ src/json.c                          | 43 ++++++++++++++
+ src/netlink_delinearize.c           | 81 +++++++++++++++++++++++++++
+ src/netlink_linearize.c             | 66 +++++++++++++++++++++-
+ src/parser_bison.y                  | 77 +++++++++++++++++++++++++
+ src/rule.c                          | 15 +++++
+ src/scanner.l                       | 12 +++-
+ src/statement.c                     | 87 +++++++++++++++++++++++++++++
+ 13 files changed, 497 insertions(+), 2 deletions(-)
+
+diff --git a/include/json.h b/include/json.h
+index 351c9fab..e4ed79d2 100644
+--- a/include/json.h
++++ b/include/json.h
+@@ -95,6 +95,7 @@ json_t *tproxy_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *synproxy_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *optstrip_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *xt_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
++json_t *trigger_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ 
+ int do_command_list_json(struct netlink_ctx *ctx, struct cmd *cmd);
+ 
+@@ -200,6 +201,7 @@ STMT_PRINT_STUB(synproxy)
+ STMT_PRINT_STUB(optstrip)
+ STMT_PRINT_STUB(xt)
+ STMT_PRINT_STUB(nattype)
++STMT_PRINT_STUB(trigger)
+ 
+ #undef STMT_PRINT_STUB
+ #undef EXPR_PRINT_STUB
+diff --git a/include/linux/netfilter/nf_tables.h b/include/linux/netfilter/nf_tables.h
+index c62e6ac5..61423bf6 100644
+--- a/include/linux/netfilter/nf_tables.h
++++ b/include/linux/netfilter/nf_tables.h
+@@ -1452,6 +1452,32 @@ enum nft_nat_attributes {
+ };
+ #define NFTA_NAT_MAX		(__NFTA_NAT_MAX - 1)
+ 
++/**
++ * enum nft_trigger_attributes - nf_tables TRIGGER expression netlink attributes
++ *
++ * NFTA_TRIGGER_MODE:				TRIGGER mode (NLA_U32: nft_registers)
++ * NFTA_TRIGGER_TPROTO:			TRIGGER trigger-proto (NLA_U16: nft_registers)
++ * NFTA_TRIGGER_FPROTO:			TRIGGER forward-proto (NLA_U16: nft_registers)
++ * NFTA_TRIGGER_TIMER:			TRIGGER timer (NLA_U32: nft_registers)
++ * NFTA_TRIGGER_TPORTS_MIN:	TRIGGER trigger-ports range start (NLA_U32: nft_registers)
++ * NFTA_TRIGGER_TPORTS_MAX:	TRIGGER trigger-ports range end (NLA_U32: nft_registers)
++ * NFTA_TRIGGER_FPORTS_MIN:	TRIGGER forward-ports range start (NLA_U32: nft_registers)
++ * NFTA_TRIGGER_FPORTS_MAX:	TRIGGER forward-ports range end (NLA_U32: nft_registers)
++ */
++enum nft_trigger_attributes {
++	NFTA_TRIGGER_UNSPEC,
++	NFTA_TRIGGER_MODE,
++	NFTA_TRIGGER_TPROTO,
++	NFTA_TRIGGER_FPROTO,
++	NFTA_TRIGGER_TIMER,
++	NFTA_TRIGGER_TPORTS_MIN,
++	NFTA_TRIGGER_TPORTS_MAX,
++	NFTA_TRIGGER_FPORTS_MIN,
++	NFTA_TRIGGER_FPORTS_MAX,
++	__NFTA_TRIGGER_MAX,
++};
++#define NFTA_TRIGGER_MAX		(__NFTA_TRIGGER_MAX - 1)
++
+ /**
+  * enum nft_tproxy_attributes - nf_tables tproxy expression netlink attributes
+  *
+diff --git a/include/parser.h b/include/parser.h
+index 87944979..c52833d2 100644
+--- a/include/parser.h
++++ b/include/parser.h
+@@ -88,6 +88,7 @@ enum startcond_type {
+ 	PARSER_SC_STMT_REJECT,
+ 	PARSER_SC_STMT_SYNPROXY,
+ 	PARSER_SC_STMT_TPROXY,
++	PARSER_SC_STMT_TRIGGER,
+ 
+ 	__SC_MAX
+ };
+diff --git a/include/rule.h b/include/rule.h
+index 5cb549c2..888efff6 100644
+--- a/include/rule.h
++++ b/include/rule.h
+@@ -271,6 +271,8 @@ extern struct chain *chain_binding_lookup(const struct table *table,
+ 					  const char *chain_name);
+ 
+ extern const char *family2str(unsigned int family);
++// Use to get trigger protocol string
++extern const char *tproto2str(uint32_t proto);
+ #define __NF_ARP_INGRESS	255
+ extern const char *hooknum2str(unsigned int family, unsigned int hooknum);
+ extern const char *chain_policy2str(uint32_t policy);
+diff --git a/include/statement.h b/include/statement.h
+index 9baf4e11..23fb145f 100644
+--- a/include/statement.h
++++ b/include/statement.h
+@@ -168,6 +168,26 @@ struct nattype_stmt {
+ 
+ extern struct stmt *nattype_stmt_alloc(const struct location *loc);
+ 
++enum trigger_modes {
++	TRIGGER_MODE_DNAT,
++	TRIGGER_MODE_FORWARD_IN,
++	TRIGGER_MODE_FORWARD_OUT,
++};
++
++extern const char *trigger_mode2str(enum trigger_modes mode);
++extern const char *trigger_proto2str(uint32_t proto);
++
++struct trigger_stmt {
++	enum trigger_modes mode;
++	uint32_t trigger_proto;
++	uint32_t forward_proto;
++	uint32_t timer;
++	struct expr *trigger_ports;
++	struct expr *forward_ports;
++};
++
++extern struct stmt *trigger_stmt_alloc(const struct location *loc);
++
+ struct optstrip_stmt {
+ 	struct expr	*expr;
+ };
+@@ -311,6 +331,7 @@ extern struct stmt *xt_stmt_alloc(const struct location *loc);
+  * @STMT_REJECT:	REJECT statement
+  * @STMT_NAT:		NAT statement
+  * @STMT_NATTYPE:		NATTYPE statement
++ * @STMT_TRIGGER:		TRIGGER statement
+  * @STMT_QUEUE:		QUEUE statement
+  * @STMT_CT:		conntrack statement
+  * @STMT_SET:		set statement
+@@ -342,6 +363,7 @@ enum stmt_types {
+ 	STMT_REJECT,
+ 	STMT_NAT,
+ 	STMT_NATTYPE,
++	STMT_TRIGGER,
+ 	STMT_TPROXY,
+ 	STMT_QUEUE,
+ 	STMT_CT,
+@@ -415,6 +437,7 @@ struct stmt {
+ 		struct reject_stmt	reject;
+ 		struct nat_stmt		nat;
+ 		struct nattype_stmt		nattype;
++		struct trigger_stmt		trigger;
+ 		struct tproxy_stmt	tproxy;
+ 		struct optstrip_stmt	optstrip;
+ 		struct queue_stmt	queue;
+diff --git a/src/evaluate.c b/src/evaluate.c
+index ba503e78..6104539c 100644
+--- a/src/evaluate.c
++++ b/src/evaluate.c
+@@ -3874,6 +3874,68 @@ static int stmt_evaluate_nattype(struct eval_ctx *ctx, struct stmt *stmt)
+ 	return 0;
+ }
+ 
++static int trigger_evaluate_proto(struct eval_ctx *ctx, struct stmt *stmt,
++							uint16_t proto)
++{
++	switch (proto) {
++	case IPPROTO_TCP:
++	case IPPROTO_UDP:
++	/* Dummy protcol resp of ALL. */
++	case 0:
++		return 0;
++	default:
++		return stmt_error(ctx, stmt, "TRIGGER protocol must be TCP/UDP/ALL!");
++	}
++}
++
++static int trigger_evaluate_ports(struct eval_ctx *ctx, struct stmt *stmt,
++							struct expr **expr)
++{
++	int err;
++	err = stmt_evaluate_arg(ctx, stmt,
++				&inet_service_type, 2 * BITS_PER_BYTE,
++				BYTEORDER_BIG_ENDIAN, expr);
++	if (err < 0)
++		return err;
++
++	return 0;
++}
++
++static int stmt_evaluate_trigger(struct eval_ctx *ctx, struct stmt *stmt)
++{
++	int err;
++
++	switch (stmt->trigger.mode) {
++	case TRIGGER_MODE_DNAT:
++	case TRIGGER_MODE_FORWARD_IN:
++	case TRIGGER_MODE_FORWARD_OUT:
++		break;
++	default:
++		return stmt_error(ctx, stmt, "TRIGGER must declare one mode!");
++	}
++
++	err = trigger_evaluate_proto(ctx, stmt, stmt->trigger.trigger_proto);
++	if (err < 0)
++		return err;
++	err = trigger_evaluate_proto(ctx, stmt, stmt->trigger.forward_proto);
++	if (err < 0)
++		return err;
++
++	if (stmt->trigger.trigger_ports != NULL) {
++		err = trigger_evaluate_ports(ctx, stmt, &stmt->trigger.trigger_ports);
++		if (err < 0)
++			return err;
++	}
++
++	if (stmt->trigger.forward_ports != NULL) {
++		err = trigger_evaluate_ports(ctx, stmt, &stmt->trigger.forward_ports);
++		if (err < 0)
++			return err;
++	}
++	stmt->flags |= STMT_F_TERMINAL;
++	return 0;
++}
++
+ static int stmt_evaluate_tproxy(struct eval_ctx *ctx, struct stmt *stmt)
+ {
+ 	struct proto_ctx *pctx = eval_proto_ctx(ctx);
+@@ -4404,6 +4466,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
+ 		return stmt_evaluate_nat(ctx, stmt);
+ 	case STMT_NATTYPE:
+ 		return stmt_evaluate_nattype(ctx, stmt);
++	case STMT_TRIGGER:
++		return stmt_evaluate_trigger(ctx, stmt);
+ 	case STMT_TPROXY:
+ 		return stmt_evaluate_tproxy(ctx, stmt);
+ 	case STMT_QUEUE:
+diff --git a/src/json.c b/src/json.c
+index 9c7f456a..76f8b528 100644
+--- a/src/json.c
++++ b/src/json.c
+@@ -1469,6 +1469,49 @@ json_t *nattype_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+ 	return json_pack("{s:o}", "NATTYPE", root);
+ }
+ 
++json_t *trigger_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
++{
++	json_t *root = json_object();
++	const char *mode = NULL;
++
++	switch (stmt->trigger.mode) {
++	case TRIGGER_MODE_DNAT:
++		mode = "dnat";
++		break;
++	case TRIGGER_MODE_FORWARD_IN:
++		mode = "forward_in";
++		break;
++	case TRIGGER_MODE_FORWARD_OUT:
++		mode = "forward_in";
++		break;
++	}
++
++	if (mode)
++		json_object_set_new(root, "mode", json_string(mode));
++
++	if (stmt->trigger.trigger_proto)
++		json_object_set_new(root, "trigger_proto",
++					json_string(tproto2str(stmt->trigger.trigger_proto)));
++
++	if (stmt->trigger.forward_proto)
++		json_object_set_new(root, "forward_proto",
++					json_string(tproto2str(stmt->trigger.forward_proto)));
++
++	if (stmt->trigger.timer)
++		json_object_set_new(root, "timer",
++					json_integer(stmt->trigger.timer));
++
++	if (stmt->trigger.trigger_ports)
++		json_object_set_new(root, "trigger_ports",
++				    expr_print_json(stmt->trigger.trigger_ports, octx));
++
++	if (stmt->trigger.forward_ports)
++		json_object_set_new(root, "forward_ports",
++				    expr_print_json(stmt->trigger.forward_ports, octx));
++
++	return json_pack("{s:o}", "TRIGGER", root);
++}
++
+ json_t *reject_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+ {
+ 	json_t *root, *jexpr = NULL;
+diff --git a/src/netlink_delinearize.c b/src/netlink_delinearize.c
+index 9a85751e..0f7c687d 100644
+--- a/src/netlink_delinearize.c
++++ b/src/netlink_delinearize.c
+@@ -1377,6 +1377,86 @@ static void netlink_parse_nattype(struct netlink_parse_ctx *ctx,
+ 	ctx->stmt = stmt;
+ }
+ 
++static void netlink_parse_trigger(struct netlink_parse_ctx *ctx,
++				   const struct location *loc,
++				   const struct nftnl_expr *nle)
++{
++	struct stmt *stmt;
++	struct expr *trigger_ports, *forward_ports;
++	enum nft_registers reg1, reg2;
++
++	stmt = trigger_stmt_alloc(loc);
++	stmt->trigger.mode = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_TRIGGER_MODE);
++	stmt->trigger.trigger_proto = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_TRIGGER_TPROTO);
++	stmt->trigger.forward_proto = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_TRIGGER_FPROTO);
++	stmt->trigger.timer = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_TRIGGER_TIMER);
++
++	reg1 = netlink_parse_register(nle, NFTNL_EXPR_TRIGGER_TPORTS_MIN);
++	if (reg1) {
++		trigger_ports = netlink_get_register(ctx, loc, reg1);
++		if (trigger_ports == NULL) {
++			netlink_error(ctx, loc,
++				      "TRIGGER statement has no trigger_ports expression");
++			goto out_err;
++		}
++
++		expr_set_type(trigger_ports, &inet_service_type, BYTEORDER_BIG_ENDIAN);
++		stmt->trigger.trigger_ports = trigger_ports;
++	}
++
++	reg2 = netlink_parse_register(nle, NFTNL_EXPR_TRIGGER_TPORTS_MAX);
++	if(reg2 && reg2 != reg1) {
++		trigger_ports = netlink_get_register(ctx, loc, reg2);
++		if (trigger_ports == NULL) {
++			netlink_error(ctx, loc,
++				      "TRIGGER statement has no trigger_ports expression");
++			goto out_err;
++		}
++
++		expr_set_type(trigger_ports, &inet_service_type, BYTEORDER_BIG_ENDIAN);
++		if (stmt->trigger.trigger_ports != NULL)
++			trigger_ports = range_expr_alloc(loc, stmt->trigger.trigger_ports, trigger_ports);
++		stmt->trigger.trigger_ports = trigger_ports;
++	}
++
++	reg1 = netlink_parse_register(nle, NFTNL_EXPR_TRIGGER_FPORTS_MIN);
++	if (reg1) {
++		forward_ports = netlink_get_register(ctx, loc, reg1);
++		if (forward_ports == NULL) {
++			netlink_error(ctx, loc,
++				      "TRIGGER statement has no forward_ports expression");
++			goto out_err;
++		}
++
++		expr_set_type(forward_ports, &inet_service_type, BYTEORDER_BIG_ENDIAN);
++		stmt->trigger.forward_ports = forward_ports;
++	}
++
++	reg2 = netlink_parse_register(nle, NFTNL_EXPR_TRIGGER_FPORTS_MAX);
++	if(reg2 && reg2 != reg1) {
++		forward_ports = netlink_get_register(ctx, loc, reg2);
++		if (forward_ports == NULL) {
++			netlink_error(ctx, loc,
++				      "TRIGGER statement has no forward_ports expression");
++			goto out_err;
++		}
++
++		expr_set_type(forward_ports, &inet_service_type, BYTEORDER_BIG_ENDIAN);
++		if (stmt->trigger.forward_ports != NULL)
++			forward_ports = range_expr_alloc(loc, stmt->trigger.forward_ports, forward_ports);
++		stmt->trigger.forward_ports = forward_ports;
++	}
++
++	ctx->stmt = stmt;
++	return;
++out_err:
++	stmt_free(stmt);
++}
++
+ static void netlink_parse_synproxy(struct netlink_parse_ctx *ctx,
+ 				   const struct location *loc,
+ 				   const struct nftnl_expr *nle)
+@@ -1933,6 +2013,7 @@ static const struct expr_handler netlink_parsers[] = {
+ 	{ .name = "xfrm",	.parse = netlink_parse_xfrm },
+ 	{ .name = "synproxy",	.parse = netlink_parse_synproxy },
+ 	{ .name = "NATTYPE", .parse = netlink_parse_nattype },
++	{ .name = "TRIGGER", .parse = netlink_parse_trigger },
+ };
+ 
+ static int netlink_parse_expr(const struct nftnl_expr *nle,
+diff --git a/src/netlink_linearize.c b/src/netlink_linearize.c
+index 44c4e3a6..4311ced3 100644
+--- a/src/netlink_linearize.c
++++ b/src/netlink_linearize.c
+@@ -1303,7 +1303,6 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
+ 		if (stmt->nat.proto->etype == EXPR_RANGE) {
+ 			pmax_reg = get_register(ctx, NULL);
+ 			registers++;
+-
+ 			netlink_gen_expr(ctx, stmt->nat.proto->left, pmin_reg);
+ 			netlink_gen_expr(ctx, stmt->nat.proto->right, pmax_reg);
+ 			netlink_put_register(nle, nftnl_reg_pmin, pmin_reg);
+@@ -1334,6 +1333,69 @@ static void netlink_gen_nattype_stmt(struct netlink_linearize_ctx *ctx,
+ 	nft_rule_add_expr(ctx, nle, &stmt->location);
+ }
+ 
++static void netlink_gen_trigger_stmt(struct netlink_linearize_ctx *ctx,
++				 const struct stmt *stmt)
++{
++	struct nftnl_expr *nle;
++	int registers = 0;
++	enum nft_registers tp_min_reg, tp_max_reg;
++	enum nft_registers fp_min_reg, fp_max_reg;
++
++	nle = alloc_nft_expr("TRIGGER");
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_TRIGGER_MODE, stmt->trigger.mode);
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_TRIGGER_TPROTO, stmt->trigger.trigger_proto);
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_TRIGGER_FPROTO, stmt->trigger.forward_proto);
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_TRIGGER_TIMER, stmt->trigger.timer);
++
++	if (stmt->trigger.trigger_ports) {
++		tp_min_reg = get_register(ctx, NULL);
++		registers++;
++
++		if (stmt->trigger.trigger_ports->etype == EXPR_RANGE) {
++			tp_max_reg = get_register(ctx, NULL);
++			registers++;
++			netlink_gen_expr(ctx, stmt->trigger.trigger_ports->left, tp_min_reg);
++			netlink_gen_expr(ctx, stmt->trigger.trigger_ports->right, tp_max_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_TPORTS_MIN,
++							tp_min_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_TPORTS_MAX,
++							tp_max_reg);
++		} else {
++			netlink_gen_expr(ctx, stmt->trigger.trigger_ports, tp_min_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_TPORTS_MIN,
++							tp_min_reg);
++		}
++	}
++
++	if (stmt->trigger.forward_ports) {
++		fp_min_reg = get_register(ctx, NULL);
++		registers++;
++
++		if (stmt->trigger.forward_ports->etype == EXPR_RANGE) {
++			fp_max_reg = get_register(ctx, NULL);
++			registers++;
++
++			netlink_gen_expr(ctx, stmt->trigger.forward_ports->left, fp_min_reg);
++			netlink_gen_expr(ctx, stmt->trigger.forward_ports->right, fp_max_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_FPORTS_MIN,
++							fp_min_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_FPORTS_MAX,
++							fp_max_reg);
++		} else {
++			netlink_gen_expr(ctx, stmt->trigger.forward_ports, fp_min_reg);
++			netlink_put_register(nle, NFTNL_EXPR_TRIGGER_FPORTS_MIN,
++							fp_min_reg);
++		}
++	}
++
++	while (registers > 0) {
++		release_register(ctx, NULL);
++		registers--;
++	}
++
++	nft_rule_add_expr(ctx, nle, &stmt->location);
++}
++
+ static void netlink_gen_tproxy_stmt(struct netlink_linearize_ctx *ctx,
+ 				 const struct stmt *stmt)
+ {
+@@ -1696,6 +1758,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
+ 		return netlink_gen_nat_stmt(ctx, stmt);
+ 	case STMT_NATTYPE:
+ 		return netlink_gen_nattype_stmt(ctx, stmt);
++	case STMT_TRIGGER:
++		return netlink_gen_trigger_stmt(ctx, stmt);
+ 	case STMT_TPROXY:
+ 		return netlink_gen_tproxy_stmt(ctx, stmt);
+ 	case STMT_SYNPROXY:
+diff --git a/src/parser_bison.y b/src/parser_bison.y
+index 7d3e899e..37b4ae63 100644
+--- a/src/parser_bison.y
++++ b/src/parser_bison.y
+@@ -633,6 +633,13 @@ int nft_lex(void *, void *, void *);
+ %token FORWARD_IN					"FORWARD_IN"
+ %token FORWARD_OUT				"FORWARD_OUT"
+ 
++%token TRIGGER						"TRIGGER"
++%token TRIGGER_PROTO			"trigger-proto"
++%token FORWARD_PROTO			"forward-proto"
++%token TRIGGER_TIMER			"timer"
++%token TRIGGER_PORTS			"trigger-ports"
++%token FORWARD_PORTS			"forward-ports"
++
+ %token QUEUE			"queue"
+ %token QUEUENUM			"num"
+ %token BYPASS			"bypass"
+@@ -774,6 +781,8 @@ int nft_lex(void *, void *, void *);
+ %type <val>			chain_stmt_type
+ %type <stmt>			nattype_stmt nattype_stmt_alloc
+ %destructor { stmt_free($$); }	nattype_stmt nattype_stmt_alloc
++%type <stmt>			trigger_stmt trigger_stmt_alloc
++%destructor { stmt_free($$); }	trigger_stmt trigger_stmt_alloc
+ 
+ %type <stmt>			queue_stmt queue_stmt_alloc	queue_stmt_compat
+ %destructor { stmt_free($$); }	queue_stmt queue_stmt_alloc	queue_stmt_compat
+@@ -1052,6 +1061,7 @@ close_scope_th		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_TH); };
+ close_scope_udp		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDP); };
+ close_scope_udplite	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDPLITE); };
+ close_scope_nattype : { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_NATTYPE); };
++close_scope_trigger : { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_TRIGGER); }
+ 
+ close_scope_log		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_LOG); }
+ close_scope_synproxy	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_SYNPROXY); }
+@@ -3084,6 +3094,7 @@ stmt			:	verdict_stmt
+ 			|	optstrip_stmt
+ 			|	xt_stmt		close_scope_xt
+ 			| nattype_stmt close_scope_nattype
++			| trigger_stmt close_scope_trigger
+ 			;
+ 
+ xt_stmt			:	XT	STRING	string
+@@ -3705,6 +3716,15 @@ nattype_stmt_arg		: NATTYPE_MODE NATTYPE_DNAT
+ 			}
+ 			;
+ 
++trigger_stmt		: trigger_stmt_alloc trigger_stmt_args
++			;
++
++trigger_stmt_alloc	: TRIGGER
++			{
++				$$ = trigger_stmt_alloc(&@$);
++			}
++			;
++
+ tproxy_stmt		:	TPROXY TO stmt_expr
+ 			{
+ 				$$ = tproxy_stmt_alloc(&@$);
+@@ -4010,6 +4030,63 @@ nat_stmt_args		:	stmt_expr
+ 			}
+ 			;
+ 
++trigger_stmt_args		: trigger_stmt_arg
++			{
++				$<stmt>$	= $<stmt>0;
++			}
++			| trigger_stmt_args trigger_stmt_arg
++			;
++
++trigger_stmt_arg		: NATTYPE_MODE NATTYPE_DNAT
++			{
++				$<stmt>0->trigger.mode = TRIGGER_MODE_DNAT;
++			}
++			| NATTYPE_MODE FORWARD_IN
++			{
++				$<stmt>0->trigger.mode = TRIGGER_MODE_FORWARD_IN;
++			}
++			| NATTYPE_MODE FORWARD_OUT
++			{
++				$<stmt>0->trigger.mode = TRIGGER_MODE_FORWARD_OUT;
++			}
++			| TRIGGER_PROTO TCP close_scope_tcp
++			{
++				$<stmt>0->trigger.trigger_proto = IPPROTO_TCP;
++			}
++			| TRIGGER_PROTO UDP close_scope_udp
++			{
++				$<stmt>0->trigger.trigger_proto = IPPROTO_UDP;
++			}
++			| TRIGGER_PROTO ALL
++			{
++				$<stmt>0->trigger.trigger_proto = 0;
++			}
++			| FORWARD_PROTO TCP close_scope_tcp
++			{
++				$<stmt>0->trigger.forward_proto = IPPROTO_TCP;
++			}
++			| FORWARD_PROTO UDP close_scope_udp
++			{
++				$<stmt>0->trigger.forward_proto = IPPROTO_UDP;
++			}
++			| FORWARD_PROTO ALL
++			{
++				$<stmt>0->trigger.forward_proto = 0;
++			}
++			| TRIGGER_TIMER NUM
++			{
++				$<stmt>0->trigger.timer = $2;
++			}
++			| TRIGGER_PORTS stmt_expr
++			{
++				$<stmt>0->trigger.trigger_ports = $2;
++			}
++			| FORWARD_PORTS stmt_expr
++			{
++				$<stmt>0->trigger.forward_ports = $2;
++			}
++			;
++
+ masq_stmt		:	masq_stmt_alloc		masq_stmt_args
+ 			|	masq_stmt_alloc
+ 			;
+diff --git a/src/rule.c b/src/rule.c
+index 533161d3..9a656ec1 100644
+--- a/src/rule.c
++++ b/src/rule.c
+@@ -795,6 +795,21 @@ const char *family2str(unsigned int family)
+ 	return "unknown";
+ }
+ 
++const char *tproto2str(uint32_t proto)
++{
++	switch (proto) {
++		case IPPROTO_TCP:
++			return "tcp";
++		case IPPROTO_UDP:
++			return "udp";
++		case 0:
++			return "all";
++		default:
++			break;
++	}
++	return "unknown";
++}
++
+ const char *hooknum2str(unsigned int family, unsigned int hooknum)
+ {
+ 	switch (family) {
+diff --git a/src/scanner.l b/src/scanner.l
+index 1d1211e3..a767ffa3 100644
+--- a/src/scanner.l
++++ b/src/scanner.l
+@@ -249,6 +249,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+ %s SCANSTATE_STMT_LOG
+ %s SCANSTATE_STMT_NAT
+ %s SCANSTATE_STMT_NATTYPE
++%s SCANSTATE_STMT_TRIGGER
+ %s SCANSTATE_STMT_REJECT
+ %s SCANSTATE_STMT_SYNPROXY
+ %s SCANSTATE_STMT_TPROXY
+@@ -470,7 +471,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+ }
+ 
+ "NATTYPE"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_NATTYPE); return NATTYPE; }
+-<SCANSTATE_STMT_NATTYPE>{
++<SCANSTATE_STMT_NATTYPE,SCANSTATE_STMT_TRIGGER>{
+ 	"MODE"			{ return NATTYPE_MODE; }
+ 	"TYPE"			{ return NATTYPE_TYPE; }
+ 
+@@ -480,6 +481,15 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+ 	"FORWARD_OUT" { return FORWARD_OUT; }
+ }
+ 
++"TRIGGER"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_TRIGGER); return TRIGGER; }
++<SCANSTATE_STMT_TRIGGER>{
++	"trigger-proto"	{ return TRIGGER_PROTO; }
++	"forward-proto"	{ return FORWARD_PROTO; }
++	"timer"					{ return TRIGGER_TIMER; }
++	"trigger-ports"	{ return TRIGGER_PORTS; }
++	"forward-ports"	{ return FORWARD_PORTS; }
++}
++
+ <SCANSTATE_AT>{
+ 	"ll"			{ return LL_HDR; }
+ 	"nh"			{ return NETWORK_HDR; }
+diff --git a/src/statement.c b/src/statement.c
+index 5fee7281..d568afe2 100644
+--- a/src/statement.c
++++ b/src/statement.c
+@@ -793,6 +793,93 @@ struct stmt *nattype_stmt_alloc(const struct location *loc)
+ 	return stmt;
+ }
+ 
++const char *trigger_mode2str(enum trigger_modes mode)
++{
++	static const char * const nattype_modes[] = {
++		[TRIGGER_MODE_DNAT] 			 = "dnat",
++		[TRIGGER_MODE_FORWARD_IN]  = "forward_in",
++		[TRIGGER_MODE_FORWARD_OUT] = "forward_out",
++	};
++
++	return nattype_modes[mode];
++}
++
++const char *trigger_proto2str(uint32_t proto)
++{
++	switch (proto) {
++		case IPPROTO_TCP:
++			return "tcp";
++		case IPPROTO_UDP:
++			return "udp";
++		case 0:
++			return "all";
++		default:
++			break;
++	}
++	return "unknown";
++}
++
++static void trigger_stmt_print(const struct stmt *stmt, struct output_ctx *octx)
++{
++	nft_print(octx, "TRIGGER %s", trigger_mode2str(stmt->trigger.mode));
++	nft_print(octx, " trigger_proto %s", trigger_proto2str(stmt->trigger.trigger_proto));
++	nft_print(octx, " forward_proto %s", trigger_proto2str(stmt->trigger.forward_proto));
++	nft_print(octx, " timer %d", stmt->trigger.timer);
++
++	if (stmt->trigger.trigger_ports) {
++		nft_print(octx, " ");
++		if (stmt->trigger.trigger_ports->etype == EXPR_VALUE) {
++			nft_print(octx, "trigger_port ");
++			expr_print(stmt->trigger.trigger_ports, octx);
++		} else if (stmt->trigger.trigger_ports->etype == EXPR_RANGE) {
++			nft_print(octx, "trigger_ports ");
++			expr_print(stmt->trigger.trigger_ports->left, octx);
++			nft_print(octx, "-");
++			expr_print(stmt->trigger.trigger_ports->right, octx);
++		}
++		else {
++			expr_print(stmt->trigger.trigger_ports, octx);
++		}
++	}
++
++	if (stmt->trigger.forward_ports) {
++		nft_print(octx, " ");
++		if (stmt->trigger.forward_ports->etype == EXPR_VALUE) {
++			nft_print(octx, "forward_ports ");
++			expr_print(stmt->trigger.forward_ports, octx);
++		} else if (stmt->trigger.forward_ports->etype == EXPR_RANGE) {
++			nft_print(octx, "forward_ports ");
++			expr_print(stmt->trigger.forward_ports->left, octx);
++			nft_print(octx, "-");
++			expr_print(stmt->trigger.forward_ports->right, octx);
++		}
++		else {
++			expr_print(stmt->trigger.forward_ports, octx);
++		}
++	}
++}
++
++static void trigger_stmt_destroy(struct stmt *stmt)
++{
++	expr_free(stmt->trigger.trigger_ports);
++	expr_free(stmt->trigger.forward_ports);
++}
++
++static const struct stmt_ops trigger_stmt_ops = {
++	.type			= STMT_TRIGGER,
++	.name			= "TRIGGER",
++	.print		= trigger_stmt_print,
++	.json			= trigger_stmt_json,
++	.destroy	= trigger_stmt_destroy,
++};
++
++struct stmt *trigger_stmt_alloc(const struct location *loc)
++{
++	struct stmt *stmt = stmt_alloc(loc, &trigger_stmt_ops);
++
++	return stmt;
++}
++
+ const char * const set_stmt_op_names[] = {
+ 	[NFT_DYNSET_OP_ADD]	= "add",
+ 	[NFT_DYNSET_OP_UPDATE]	= "update",
+-- 
+2.34.1
+
