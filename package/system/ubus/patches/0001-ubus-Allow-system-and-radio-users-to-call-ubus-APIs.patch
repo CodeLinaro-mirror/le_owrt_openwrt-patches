@@ -1,0 +1,30 @@
+From e625b22bdd8e110396c22f49a2e03e2773bd88ca Mon Sep 17 00:00:00 2001
+From: Keerthi Gowda <quic_kbalehal@quicinc.com>
+Date: Tue, 2 May 2023 15:26:24 -0700
+Subject: [PATCH] ubus: Allow system and radio users to call ubus APIs
+
+System users need to start new procd service at user case boundary.
+Hence they need permission to call procd service exposed UBUS APIS.
+
+Signed-off-by: Keerthi Gowda Balehalli Satyanarayana <quic_kbalehal@quicinc.com>
+---
+ ubusd_acl.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/ubusd_acl.c b/ubusd_acl.c
+index e050e2c..2fd3746 100644
+--- a/ubusd_acl.c
++++ b/ubusd_acl.c
+@@ -92,7 +92,8 @@ ubusd_acl_check(struct ubus_client *cl, const char *obj,
+ 	struct ubusd_acl_obj *acl;
+ 	int match_len = 0;
+ 
+-	if (!cl || !cl->uid || !obj)
++	/* Allow system users to call ubus APIs from procd service*/
++	if (!cl || !cl->uid || !obj || (cl->uid == 1000 && cl->gid == 1000) || (cl->uid == 1001 && cl->gid == 1001))
+ 		return 0;
+ 
+ 	/*
+-- 
+2.17.1
+
