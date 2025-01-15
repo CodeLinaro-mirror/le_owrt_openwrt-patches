@@ -1,5 +1,7 @@
 LOCAL_SRC:=$(TOPDIR)/owrt-qti-sepolicy
 
+PKG_LICENSE+=BSD-3-Clause-Clear
+
 define Build/Configure_append
 	mkdir -p $(PKG_BUILD_DIR)/src/qti
 	$(CP) $(LOCAL_SRC)/cil/file/execfile/*.cil $(PKG_BUILD_DIR)/src/
