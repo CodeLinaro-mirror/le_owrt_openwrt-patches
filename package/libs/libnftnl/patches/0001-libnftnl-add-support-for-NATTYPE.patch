@@ -1,0 +1,257 @@
+From eb615b8bac630a46d27ea647bee1f4cbb1c27934 Mon Sep 17 00:00:00 2001
+From: Yinxin Sun <quic_yinxsun@quicinc.com>
+Date: Tue, 26 Nov 2024 17:38:36 +0800
+Subject: [PATCH] libnftnl: add support for NATTYPE
+
+Add netlink messages for NATTYPE
+
+Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
+---
+ include/libnftnl/expr.h             |   6 ++
+ include/linux/netfilter/nf_tables.h |  20 ++++
+ src/Makefile.am                     |   1 +
+ src/expr/nattype.c                  | 150 ++++++++++++++++++++++++++++
+ src/expr_ops.c                      |   2 +
+ 5 files changed, 179 insertions(+)
+ create mode 100644 src/expr/nattype.c
+
+diff --git a/include/libnftnl/expr.h b/include/libnftnl/expr.h
+index 9873228..22cb9ae 100644
+--- a/include/libnftnl/expr.h
++++ b/include/libnftnl/expr.h
+@@ -152,6 +152,12 @@ enum {
+ 	NFTNL_EXPR_NAT_FLAGS,
+ };
+ 
++enum {
++	NFTNL_EXPR_NATTYPE_MODE		= NFTNL_EXPR_BASE,
++	NFTNL_EXPR_NATTYPE_TYPE,
++	__NFTNL_EXPR_NATTYPE_MAX
++};
++
+ enum {
+ 	NFTNL_EXPR_TPROXY_FAMILY	= NFTNL_EXPR_BASE,
+ 	NFTNL_EXPR_TPROXY_REG_ADDR,
+diff --git a/include/linux/netfilter/nf_tables.h b/include/linux/netfilter/nf_tables.h
+index c48b193..ae86637 100644
+--- a/include/linux/netfilter/nf_tables.h
++++ b/include/linux/netfilter/nf_tables.h
+@@ -1431,6 +1431,26 @@ enum nft_nat_attributes {
+ };
+ #define NFTA_NAT_MAX		(__NFTA_NAT_MAX - 1)
+ 
++enum nft_nattype_modes {
++	NATTYPE_MODE_DNAT,
++	NATTYPE_MODE_FORWARD_IN,
++	NATTYPE_MODE_FORWARD_OUT,
++};
++
++/**
++ * enum nft_nattype_attributes - nf_tables NATTYPE expression netlink attributes
++ *
++ * NFTA_NATTYPE_MODE: NATTYPE mode (NLA_U32: nft_registers)
++ * NFTA_NATTYPE_TYPE: NATTYPE type (NLA_U32: nft_registers)
++ */
++enum nft_nattype_attributes {
++	NFTA_NATTYPE_UNSPEC,
++	NFTA_NATTYPE_MODE,
++	NFTA_NATTYPE_TYPE,
++	__NFTA_NATTYPE_MAX,
++};
++#define NFTA_NATTYPE_MAX		(__NFTA_NATTYPE_MAX - 1)
++
+ /**
+  * enum nft_tproxy_attributes - nf_tables tproxy expression netlink attributes
+  *
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 3cd259c..aa28fbf 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -45,6 +45,7 @@ libnftnl_la_SOURCES = utils.c		\
+ 		      expr/meta.c	\
+ 		      expr/numgen.c	\
+ 		      expr/nat.c	\
++		      expr/nattype.c	\
+ 		      expr/tproxy.c	\
+ 		      expr/objref.c	\
+ 		      expr/payload.c	\
+diff --git a/src/expr/nattype.c b/src/expr/nattype.c
+new file mode 100644
+index 0000000..219ceea
+--- /dev/null
++++ b/src/expr/nattype.c
+@@ -0,0 +1,150 @@
++/*
++ * Authors:
++ * 	Yinxsun Sun <quic_yinxsun@quicinc.com>
++ */
++/* Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved. */
++
++#include "internal.h"
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <libmnl/libmnl.h>
++#include <libnftnl/expr.h>
++#include <libnftnl/rule.h>
++#include <limits.h>
++#include <linux/netfilter/nf_tables.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++struct nftnl_expr_nattype {
++  enum nft_nattype_modes mode;
++  uint32_t type;
++};
++
++static int nftnl_expr_nattype_set(struct nftnl_expr *e, uint16_t type,
++                                  const void *data, uint32_t data_len) {
++  struct nftnl_expr_nattype *nattype = nftnl_expr_data(e);
++
++  switch (type) {
++  case NFTNL_EXPR_NATTYPE_MODE:
++    memcpy(&nattype->mode, data, sizeof(nattype->mode));
++    break;
++  case NFTNL_EXPR_NATTYPE_TYPE:
++    memcpy(&nattype->type, data, sizeof(nattype->type));
++    break;
++  }
++
++  return 0;
++}
++
++static const void *nftnl_expr_nattype_get(const struct nftnl_expr *e,
++                                          uint16_t type, uint32_t *data_len) {
++  struct nftnl_expr_nattype *nattype = nftnl_expr_data(e);
++
++  switch (type) {
++  case NFTNL_EXPR_NATTYPE_MODE:
++    *data_len = sizeof(nattype->mode);
++    return &nattype->mode;
++  case NFTNL_EXPR_NATTYPE_TYPE:
++    *data_len = sizeof(nattype->type);
++    return &nattype->type;
++  }
++
++  return NULL;
++}
++
++static int nftnl_expr_nattype_cb(const struct nlattr *attr, void *data) {
++  const struct nlattr **tb = data;
++  int type = mnl_attr_get_type(attr);
++
++  if (mnl_attr_type_valid(attr, NFTA_NATTYPE_MAX) < 0)
++    return MNL_CB_OK;
++
++  switch (type) {
++  case NFTA_NATTYPE_MODE:
++  case NFTA_NATTYPE_TYPE:
++    if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0)
++      abi_breakage();
++    break;
++  }
++
++  tb[type] = attr;
++  return MNL_CB_OK;
++}
++
++static int nftnl_expr_nattype_parse(struct nftnl_expr *e, struct nlattr *attr) {
++  struct nftnl_expr_nattype *nattype = nftnl_expr_data(e);
++  struct nlattr *tb[NFTA_NATTYPE_MAX + 1] = {};
++
++  if (mnl_attr_parse_nested(attr, nftnl_expr_nattype_cb, tb) < 0)
++    return -1;
++
++  if (tb[NFTA_NATTYPE_MODE]) {
++    nattype->mode = ntohl(mnl_attr_get_u32(tb[NFTA_NATTYPE_MODE]));
++    e->flags |= (1 << NFTNL_EXPR_NATTYPE_MODE);
++  }
++  if (tb[NFTA_NATTYPE_TYPE]) {
++    nattype->type = ntohl(mnl_attr_get_u32(tb[NFTA_NATTYPE_TYPE]));
++    e->flags |= (1 << NFTNL_EXPR_NATTYPE_TYPE);
++  }
++
++  return 0;
++}
++
++static void nftnl_expr_nattype_build(struct nlmsghdr *nlh,
++                                     const struct nftnl_expr *e) {
++  struct nftnl_expr_nattype *nattype = nftnl_expr_data(e);
++
++  if (e->flags & (1 << NFTNL_EXPR_NATTYPE_MODE))
++    mnl_attr_put_u32(nlh, NFTA_NATTYPE_MODE, htonl(nattype->mode));
++  if (e->flags & (1 << NFTNL_EXPR_NATTYPE_TYPE))
++    mnl_attr_put_u32(nlh, NFTA_NATTYPE_TYPE, htonl(nattype->type));
++}
++
++static inline const char *natmode2str(uint32_t natmode) {
++  switch (natmode) {
++  case NATTYPE_MODE_DNAT:
++    return "dnat";
++  case NATTYPE_MODE_FORWARD_IN:
++    return "forward_in";
++  case NATTYPE_MODE_FORWARD_OUT:
++    return "forward_out";
++  default:
++    return "unknown";
++  }
++}
++
++static int nftnl_expr_nattype_snprintf(char *buf, size_t remain, uint32_t flags,
++                                       const struct nftnl_expr *e) {
++  struct nftnl_expr_nattype *nattype = nftnl_expr_data(e);
++  int offset = 0, ret = 0;
++
++  if (e->flags & (1 << NFTNL_EXPR_NATTYPE_MODE) &&
++      e->flags & (1 << NFTNL_EXPR_NATTYPE_TYPE)) {
++    ret = snprintf(buf, remain, "mode %s type %d", natmode2str(nattype->mode),
++                   nattype->type);
++    SNPRINTF_BUFFER_SIZE(ret, remain, offset);
++  }
++
++  return offset;
++}
++
++// static struct attr_policy nattype_attr_policy[__NFTNL_EXPR_NATTYPE_MAX] = {
++// 	[NFTNL_EXPR_NATTYPE_MODE]               = { .maxlen = sizeof(uint32_t)
++// }, 	[NFTNL_EXPR_NATTYPE_TYPE]               = { .maxlen = sizeof(uint32_t)
++// },
++// };
++
++struct expr_ops expr_ops_nattype = {
++    .name = "NATTYPE",
++    .alloc_len = sizeof(struct nftnl_expr_nattype),
++    .max_attr = __NFTNL_EXPR_NATTYPE_MAX - 1,
++    // .nftnl_max_attr	= __NFTNL_EXPR_NATTYPE_MAX - 1,
++    // .attr_policy	= nattype_attr_policy,
++    .set = nftnl_expr_nattype_set,
++    .get = nftnl_expr_nattype_get,
++    .parse = nftnl_expr_nattype_parse,
++    .build = nftnl_expr_nattype_build,
++    .output = nftnl_expr_nattype_snprintf,
++};
+\ No newline at end of file
+diff --git a/src/expr_ops.c b/src/expr_ops.c
+index b85f472..7548569 100644
+--- a/src/expr_ops.c
++++ b/src/expr_ops.c
+@@ -43,6 +43,7 @@ extern struct expr_ops expr_ops_synproxy;
+ extern struct expr_ops expr_ops_tunnel;
+ extern struct expr_ops expr_ops_osf;
+ extern struct expr_ops expr_ops_xfrm;
++extern struct expr_ops expr_ops_nattype;
+ 
+ static struct expr_ops expr_ops_notrack = {
+ 	.name	= "notrack",
+@@ -89,6 +90,7 @@ static struct expr_ops *expr_ops[] = {
+ 	&expr_ops_tunnel,
+ 	&expr_ops_osf,
+ 	&expr_ops_xfrm,
++	&expr_ops_nattype,
+ 	NULL,
+ };
+ 
+-- 
+2.34.1
+
