@@ -1,0 +1,404 @@
+From ace42f86db8c33c1a3205fa4d712fb7ef54f750f Mon Sep 17 00:00:00 2001
+From: Yinxin Sun <quic_yinxsun@quicinc.com>
+Date: Fri, 29 Nov 2024 10:10:04 +0800
+Subject: [PATCH] nftables: Add front-end for NATTYPE
+
+Translate arguments from iptables to nftables.
+Add the ability for nftables to deal with kernel NATTYPE module
+
+Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
+---
+ include/json.h            |  2 ++
+ include/parser.h          |  1 +
+ include/statement.h       | 19 +++++++++++++++++
+ src/evaluate.c            | 11 ++++++++++
+ src/json.c                | 27 +++++++++++++++++++++++
+ src/netlink_delinearize.c | 16 ++++++++++++++
+ src/netlink_linearize.c   | 14 ++++++++++++
+ src/parser_bison.y        | 45 +++++++++++++++++++++++++++++++++++++++
+ src/scanner.l             | 12 +++++++++++
+ src/statement.c           | 31 +++++++++++++++++++++++++++
+ 10 files changed, 178 insertions(+)
+
+diff --git a/include/json.h b/include/json.h
+index da605ed9..351c9fab 100644
+--- a/include/json.h
++++ b/include/json.h
+@@ -81,6 +81,7 @@ json_t *notrack_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *dup_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *meta_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *nat_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
++json_t *nattype_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *reject_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *counter_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+ json_t *set_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+@@ -198,6 +199,7 @@ STMT_PRINT_STUB(tproxy)
+ STMT_PRINT_STUB(synproxy)
+ STMT_PRINT_STUB(optstrip)
+ STMT_PRINT_STUB(xt)
++STMT_PRINT_STUB(nattype)
+ 
+ #undef STMT_PRINT_STUB
+ #undef EXPR_PRINT_STUB
+diff --git a/include/parser.h b/include/parser.h
+index f79a22f3..87944979 100644
+--- a/include/parser.h
++++ b/include/parser.h
+@@ -84,6 +84,7 @@ enum startcond_type {
+ 	PARSER_SC_STMT_FWD,
+ 	PARSER_SC_STMT_LOG,
+ 	PARSER_SC_STMT_NAT,
++	PARSER_SC_STMT_NATTYPE,
+ 	PARSER_SC_STMT_REJECT,
+ 	PARSER_SC_STMT_SYNPROXY,
+ 	PARSER_SC_STMT_TPROXY,
+diff --git a/include/statement.h b/include/statement.h
+index 720a6ac2..9baf4e11 100644
+--- a/include/statement.h
++++ b/include/statement.h
+@@ -4,6 +4,7 @@
+ #include <list.h>
+ #include <expression.h>
+ #include <json.h>
++#include <stdint.h>
+ 
+ extern struct stmt *expr_stmt_alloc(const struct location *loc,
+ 				    struct expr *expr);
+@@ -152,6 +153,21 @@ struct nat_stmt {
+ extern struct stmt *nat_stmt_alloc(const struct location *loc,
+ 				   enum nft_nat_etypes type);
+ 
++enum nattype_modes {
++	NATTYPE_MODE_DNAT,
++	NATTYPE_MODE_FORWARD_IN,
++	NATTYPE_MODE_FORWARD_OUT,
++};
++
++extern const char *nattype_emode2str(enum nattype_modes mode);
++
++struct nattype_stmt {
++	enum nattype_modes mode;
++	uint32_t					 type;
++};
++
++extern struct stmt *nattype_stmt_alloc(const struct location *loc);
++
+ struct optstrip_stmt {
+ 	struct expr	*expr;
+ };
+@@ -294,6 +310,7 @@ extern struct stmt *xt_stmt_alloc(const struct location *loc);
+  * @STMT_LOG:		log statement
+  * @STMT_REJECT:	REJECT statement
+  * @STMT_NAT:		NAT statement
++ * @STMT_NATTYPE:		NATTYPE statement
+  * @STMT_QUEUE:		QUEUE statement
+  * @STMT_CT:		conntrack statement
+  * @STMT_SET:		set statement
+@@ -324,6 +341,7 @@ enum stmt_types {
+ 	STMT_LOG,
+ 	STMT_REJECT,
+ 	STMT_NAT,
++	STMT_NATTYPE,
+ 	STMT_TPROXY,
+ 	STMT_QUEUE,
+ 	STMT_CT,
+@@ -396,6 +414,7 @@ struct stmt {
+ 		struct limit_stmt	limit;
+ 		struct reject_stmt	reject;
+ 		struct nat_stmt		nat;
++		struct nattype_stmt		nattype;
+ 		struct tproxy_stmt	tproxy;
+ 		struct optstrip_stmt	optstrip;
+ 		struct queue_stmt	queue;
+diff --git a/src/evaluate.c b/src/evaluate.c
+index 33e4ac93..ba503e78 100644
+--- a/src/evaluate.c
++++ b/src/evaluate.c
+@@ -3865,6 +3865,15 @@ static int stmt_evaluate_nat(struct eval_ctx *ctx, struct stmt *stmt)
+ 	return 0;
+ }
+ 
++static int stmt_evaluate_nattype(struct eval_ctx *ctx, struct stmt *stmt)
++{
++	if (stmt->nattype.type != 0 &&
++			!(stmt->nattype.type == 1 || stmt->nattype.type == 2))
++		return stmt_error(ctx, stmt, "This type is not supported for NATTYPE");
++
++	return 0;
++}
++
+ static int stmt_evaluate_tproxy(struct eval_ctx *ctx, struct stmt *stmt)
+ {
+ 	struct proto_ctx *pctx = eval_proto_ctx(ctx);
+@@ -4393,6 +4402,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
+ 		return stmt_evaluate_reject(ctx, stmt);
+ 	case STMT_NAT:
+ 		return stmt_evaluate_nat(ctx, stmt);
++	case STMT_NATTYPE:
++		return stmt_evaluate_nattype(ctx, stmt);
+ 	case STMT_TPROXY:
+ 		return stmt_evaluate_tproxy(ctx, stmt);
+ 	case STMT_QUEUE:
+diff --git a/src/json.c b/src/json.c
+index a119dfc4..9c7f456a 100644
+--- a/src/json.c
++++ b/src/json.c
+@@ -1442,6 +1442,33 @@ json_t *nat_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+ 	return json_pack("{s:o}", nat_etype2str(stmt->nat.type), root);
+ }
+ 
++json_t *nattype_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
++{
++	json_t *root = json_object();
++	const char *mode = NULL;
++
++	switch (stmt->nattype.mode) {
++	case NATTYPE_MODE_DNAT:
++		mode = "dnat";
++		break;
++	case NATTYPE_MODE_FORWARD_IN:
++		mode = "forward_in";
++		break;
++	case NATTYPE_MODE_FORWARD_OUT:
++		mode = "forward_in";
++		break;
++	}
++
++	if (mode)
++		json_object_set_new(root, "mode", json_string(mode));
++
++	if (stmt->nattype.type)
++		json_object_set_new(root, "type",
++					json_integer(stmt->nattype.type));
++
++	return json_pack("{s:o}", "NATTYPE", root);
++}
++
+ json_t *reject_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+ {
+ 	json_t *root, *jexpr = NULL;
+diff --git a/src/netlink_delinearize.c b/src/netlink_delinearize.c
+index 9241f466..9a85751e 100644
+--- a/src/netlink_delinearize.c
++++ b/src/netlink_delinearize.c
+@@ -1362,6 +1362,21 @@ out_err:
+ 	stmt_free(stmt);
+ }
+ 
++static void netlink_parse_nattype(struct netlink_parse_ctx *ctx,
++				   const struct location *loc,
++				   const struct nftnl_expr *nle)
++{
++	struct stmt *stmt;
++
++	stmt = nattype_stmt_alloc(loc);
++	stmt->nattype.mode = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_NATTYPE_MODE);
++	stmt->nattype.type = nftnl_expr_get_u32(nle,
++							NFTNL_EXPR_NATTYPE_TYPE);
++
++	ctx->stmt = stmt;
++}
++
+ static void netlink_parse_synproxy(struct netlink_parse_ctx *ctx,
+ 				   const struct location *loc,
+ 				   const struct nftnl_expr *nle)
+@@ -1917,6 +1932,7 @@ static const struct expr_handler netlink_parsers[] = {
+ 	{ .name = "flow_offload", .parse = netlink_parse_flow_offload },
+ 	{ .name = "xfrm",	.parse = netlink_parse_xfrm },
+ 	{ .name = "synproxy",	.parse = netlink_parse_synproxy },
++	{ .name = "NATTYPE", .parse = netlink_parse_nattype },
+ };
+ 
+ static int netlink_parse_expr(const struct nftnl_expr *nle,
+diff --git a/src/netlink_linearize.c b/src/netlink_linearize.c
+index f5b2d6bb..44c4e3a6 100644
+--- a/src/netlink_linearize.c
++++ b/src/netlink_linearize.c
+@@ -1322,6 +1322,18 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
+ 	nft_rule_add_expr(ctx, nle, &stmt->location);
+ }
+ 
++static void netlink_gen_nattype_stmt(struct netlink_linearize_ctx *ctx,
++				const struct stmt *stmt)
++{
++	struct nftnl_expr *nle;
++
++	nle = alloc_nft_expr("NATTYPE");
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_NATTYPE_MODE, stmt->nattype.mode);
++	nftnl_expr_set_u32(nle, NFTNL_EXPR_NATTYPE_TYPE, stmt->nattype.type);
++
++	nft_rule_add_expr(ctx, nle, &stmt->location);
++}
++
+ static void netlink_gen_tproxy_stmt(struct netlink_linearize_ctx *ctx,
+ 				 const struct stmt *stmt)
+ {
+@@ -1682,6 +1694,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
+ 		return netlink_gen_reject_stmt(ctx, stmt);
+ 	case STMT_NAT:
+ 		return netlink_gen_nat_stmt(ctx, stmt);
++	case STMT_NATTYPE:
++		return netlink_gen_nattype_stmt(ctx, stmt);
+ 	case STMT_TPROXY:
+ 		return netlink_gen_tproxy_stmt(ctx, stmt);
+ 	case STMT_SYNPROXY:
+diff --git a/src/parser_bison.y b/src/parser_bison.y
+index 553ddf97..7d3e899e 100644
+--- a/src/parser_bison.y
++++ b/src/parser_bison.y
+@@ -626,6 +626,13 @@ int nft_lex(void *, void *, void *);
+ %token FULLY_RANDOM		"fully-random"
+ %token PERSISTENT		"persistent"
+ 
++%token NATTYPE						"NATTYPE"
++%token NATTYPE_MODE				"MODE"
++%token NATTYPE_TYPE				"TYPE"
++%token NATTYPE_DNAT				"DNAT"
++%token FORWARD_IN					"FORWARD_IN"
++%token FORWARD_OUT				"FORWARD_OUT"
++
+ %token QUEUE			"queue"
+ %token QUEUENUM			"num"
+ %token BYPASS			"bypass"
+@@ -765,6 +772,8 @@ int nft_lex(void *, void *, void *);
+ %type <stmt>			chain_stmt
+ %destructor { stmt_free($$); }	chain_stmt
+ %type <val>			chain_stmt_type
++%type <stmt>			nattype_stmt nattype_stmt_alloc
++%destructor { stmt_free($$); }	nattype_stmt nattype_stmt_alloc
+ 
+ %type <stmt>			queue_stmt queue_stmt_alloc	queue_stmt_compat
+ %destructor { stmt_free($$); }	queue_stmt queue_stmt_alloc	queue_stmt_compat
+@@ -1042,6 +1051,7 @@ close_scope_type	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_TYPE); };
+ close_scope_th		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_TH); };
+ close_scope_udp		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDP); };
+ close_scope_udplite	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDPLITE); };
++close_scope_nattype : { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_NATTYPE); };
+ 
+ close_scope_log		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_LOG); }
+ close_scope_synproxy	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_SYNPROXY); }
+@@ -3073,6 +3083,7 @@ stmt			:	verdict_stmt
+ 			|	chain_stmt
+ 			|	optstrip_stmt
+ 			|	xt_stmt		close_scope_xt
++			| nattype_stmt close_scope_nattype
+ 			;
+ 
+ xt_stmt			:	XT	STRING	string
+@@ -3660,6 +3671,40 @@ nat_stmt_alloc		:	SNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_SNAT); }
+ 			|	DNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_DNAT); }
+ 			;
+ 
++nattype_stmt		: nattype_stmt_alloc nattype_stmt_args
++			;
++
++nattype_stmt_alloc	: NATTYPE
++			{
++				$$ = nattype_stmt_alloc(&@$);
++			}
++			;
++
++nattype_stmt_args		: nattype_stmt_arg
++			{
++				$<stmt>$	= $<stmt>0;
++			}
++			| nattype_stmt_args nattype_stmt_arg
++			;
++
++nattype_stmt_arg		: NATTYPE_MODE NATTYPE_DNAT
++			{
++				$<stmt>0->nattype.mode = NATTYPE_MODE_DNAT;
++			}
++			| NATTYPE_MODE FORWARD_IN
++			{
++				$<stmt>0->nattype.mode = NATTYPE_MODE_FORWARD_IN;
++			}
++			| NATTYPE_MODE FORWARD_OUT
++			{
++				$<stmt>0->nattype.mode = NATTYPE_MODE_FORWARD_OUT;
++			}
++			| NATTYPE_TYPE NUM
++			{
++				$<stmt>0->nattype.type = $2;
++			}
++			;
++
+ tproxy_stmt		:	TPROXY TO stmt_expr
+ 			{
+ 				$$ = tproxy_stmt_alloc(&@$);
+diff --git a/src/scanner.l b/src/scanner.l
+index c903b8c3..1d1211e3 100644
+--- a/src/scanner.l
++++ b/src/scanner.l
+@@ -248,6 +248,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+ %s SCANSTATE_STMT_FWD
+ %s SCANSTATE_STMT_LOG
+ %s SCANSTATE_STMT_NAT
++%s SCANSTATE_STMT_NATTYPE
+ %s SCANSTATE_STMT_REJECT
+ %s SCANSTATE_STMT_SYNPROXY
+ %s SCANSTATE_STMT_TPROXY
+@@ -468,6 +469,17 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+ 	"port"			{ return PORT; }
+ }
+ 
++"NATTYPE"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_NATTYPE); return NATTYPE; }
++<SCANSTATE_STMT_NATTYPE>{
++	"MODE"			{ return NATTYPE_MODE; }
++	"TYPE"			{ return NATTYPE_TYPE; }
++
++	/* belong to mode */
++	"DNAT"				{ return NATTYPE_DNAT; }
++	"FORWARD_IN"	{ return FORWARD_IN; }
++	"FORWARD_OUT" { return FORWARD_OUT; }
++}
++
+ <SCANSTATE_AT>{
+ 	"ll"			{ return LL_HDR; }
+ 	"nh"			{ return NETWORK_HDR; }
+diff --git a/src/statement.c b/src/statement.c
+index 9ca7e208..5fee7281 100644
+--- a/src/statement.c
++++ b/src/statement.c
+@@ -762,6 +762,37 @@ struct stmt *nat_stmt_alloc(const struct location *loc,
+ 	return stmt;
+ }
+ 
++const char *nattype_emode2str(enum nattype_modes mode)
++{
++	static const char * const nattype_modes[] = {
++		[NATTYPE_MODE_DNAT] 			 = "dnat",
++		[NATTYPE_MODE_FORWARD_IN]  = "forward_in",
++		[NATTYPE_MODE_FORWARD_OUT] = "forward_out",
++	};
++
++	return nattype_modes[mode];
++}
++
++static void nattype_stmt_print(const struct stmt *stmt, struct output_ctx *octx)
++{
++	nft_print(octx, "NATTYPE mode %s", nattype_emode2str(stmt->nattype.mode));
++	nft_print(octx, " type %d", stmt->nattype.type);
++}
++
++static const struct stmt_ops nattype_stmt_ops = {
++	.type			= STMT_NATTYPE,
++	.name			= "NATTYPE",
++	.print		= nattype_stmt_print,
++	.json			= nattype_stmt_json,
++};
++
++struct stmt *nattype_stmt_alloc(const struct location *loc)
++{
++	struct stmt *stmt = stmt_alloc(loc, &nattype_stmt_ops);
++
++	return stmt;
++}
++
+ const char * const set_stmt_op_names[] = {
+ 	[NFT_DYNSET_OP_ADD]	= "add",
+ 	[NFT_DYNSET_OP_UPDATE]	= "update",
+-- 
+2.34.1
+
