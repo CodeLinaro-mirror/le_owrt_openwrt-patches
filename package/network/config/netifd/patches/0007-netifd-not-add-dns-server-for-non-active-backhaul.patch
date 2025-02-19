@@ -1,0 +1,31 @@
+From 867ce20f874fa07c9ef571064d27f414b94d7bf4 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Wed, 19 Feb 2025 15:13:06 +0800
+Subject: [PATCH] netifd: not add dns server for non-active backhaul
+
+Change-Id: I67ae6ad6f3101e65986525ecc5126b7d619d3add
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ interface-ip.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/interface-ip.c b/interface-ip.c
+index 9cc7fcf..79b99c0 100644
+--- a/interface-ip.c
++++ b/interface-ip.c
+@@ -1557,6 +1557,12 @@ __interface_write_dns_entries(FILE *f, const char *jail)
+ 		    vlist_simple_empty(&iface->config_ip.dns_servers))
+ 			continue;
+ 
++		if (iface->proto_ip.no_defaultroute == true)
++		{
++			D(INTERFACE, "Skip add dns server for interface since default route not present %s\n", iface->name);
++			continue;
++		}
++
+ 		entry = calloc(1, sizeof(*entry));
+ 		if (!entry)
+ 			continue;
+-- 
+2.40.0.windows.1
+

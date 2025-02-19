@@ -1,0 +1,30 @@
+From b9c8534aafbb3a1e013310e3323159f984f8afa8 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Wed, 19 Feb 2025 16:32:45 +0800
+Subject: [PATCH] netifd: fix for ezmesh option network backhaul issue
+
+Change-Id: Idf7262a2c48d6ed97f21144d522db0ec9f94259e
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ device.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/device.c b/device.c
+index e030d26..e84f9f4 100644
+--- a/device.c
++++ b/device.c
+@@ -850,8 +850,9 @@ device_create_default(const char *name, bool external)
+ {
+ 	struct device *dev;
+ 
+-	if (!external && system_if_force_external(name))
+-		return NULL;
++// netifd mark wifi device as external, but we handle wifi as non-external, so mark out below line
++//	if (!external && system_if_force_external(name))
++//		return NULL;
+ 
+ 	D(DEVICE, "Create simple device '%s'", name);
+ 	dev = calloc(1, sizeof(*dev));
+-- 
+2.40.0.windows.1
+
