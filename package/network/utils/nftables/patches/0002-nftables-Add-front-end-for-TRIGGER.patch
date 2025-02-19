@@ -1,4 +1,4 @@
-From 1bd450a4057fc950ad08c05842b5a48eeae390ab Mon Sep 17 00:00:00 2001
+From 575d945505602c71b8f45fdcccb459354c0bcbde Mon Sep 17 00:00:00 2001
 From: Yinxin Sun <quic_yinxsun@quicinc.com>
 Date: Fri, 29 Nov 2024 10:13:09 +0800
 Subject: [PATCH] nftables: Add front-end for TRIGGER
@@ -24,10 +24,10 @@ Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
  13 files changed, 497 insertions(+), 2 deletions(-)
 
 diff --git a/include/json.h b/include/json.h
-index 351c9fab..e4ed79d2 100644
+index c823de55..7c93960e 100644
 --- a/include/json.h
 +++ b/include/json.h
-@@ -95,6 +95,7 @@ json_t *tproxy_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
+@@ -96,6 +96,7 @@ json_t *tproxy_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
  json_t *synproxy_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
  json_t *optstrip_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
  json_t *xt_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
@@ -35,7 +35,7 @@ index 351c9fab..e4ed79d2 100644
  
  int do_command_list_json(struct netlink_ctx *ctx, struct cmd *cmd);
  
-@@ -200,6 +201,7 @@ STMT_PRINT_STUB(synproxy)
+@@ -202,6 +203,7 @@ STMT_PRINT_STUB(synproxy)
  STMT_PRINT_STUB(optstrip)
  STMT_PRINT_STUB(xt)
  STMT_PRINT_STUB(nattype)
@@ -81,7 +81,7 @@ index c62e6ac5..61423bf6 100644
   * enum nft_tproxy_attributes - nf_tables tproxy expression netlink attributes
   *
 diff --git a/include/parser.h b/include/parser.h
-index 87944979..c52833d2 100644
+index ed7fe26c..b4974818 100644
 --- a/include/parser.h
 +++ b/include/parser.h
 @@ -88,6 +88,7 @@ enum startcond_type {
@@ -93,7 +93,7 @@ index 87944979..c52833d2 100644
  	__SC_MAX
  };
 diff --git a/include/rule.h b/include/rule.h
-index 5cb549c2..888efff6 100644
+index 5b3e12b5..a1b90903 100644
 --- a/include/rule.h
 +++ b/include/rule.h
 @@ -271,6 +271,8 @@ extern struct chain *chain_binding_lookup(const struct table *table,
@@ -106,7 +106,7 @@ index 5cb549c2..888efff6 100644
  extern const char *hooknum2str(unsigned int family, unsigned int hooknum);
  extern const char *chain_policy2str(uint32_t policy);
 diff --git a/include/statement.h b/include/statement.h
-index 9baf4e11..23fb145f 100644
+index 1f679e7f..320d4540 100644
 --- a/include/statement.h
 +++ b/include/statement.h
 @@ -168,6 +168,26 @@ struct nattype_stmt {
@@ -161,10 +161,10 @@ index 9baf4e11..23fb145f 100644
  		struct optstrip_stmt	optstrip;
  		struct queue_stmt	queue;
 diff --git a/src/evaluate.c b/src/evaluate.c
-index ba503e78..6104539c 100644
+index d4439728..836d39a6 100644
 --- a/src/evaluate.c
 +++ b/src/evaluate.c
-@@ -3874,6 +3874,68 @@ static int stmt_evaluate_nattype(struct eval_ctx *ctx, struct stmt *stmt)
+@@ -4208,6 +4208,68 @@ static int stmt_evaluate_nattype(struct eval_ctx *ctx, struct stmt *stmt)
  	return 0;
  }
  
@@ -233,7 +233,7 @@ index ba503e78..6104539c 100644
  static int stmt_evaluate_tproxy(struct eval_ctx *ctx, struct stmt *stmt)
  {
  	struct proto_ctx *pctx = eval_proto_ctx(ctx);
-@@ -4404,6 +4466,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
+@@ -4740,6 +4802,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
  		return stmt_evaluate_nat(ctx, stmt);
  	case STMT_NATTYPE:
  		return stmt_evaluate_nattype(ctx, stmt);
@@ -243,10 +243,10 @@ index ba503e78..6104539c 100644
  		return stmt_evaluate_tproxy(ctx, stmt);
  	case STMT_QUEUE:
 diff --git a/src/json.c b/src/json.c
-index 9c7f456a..76f8b528 100644
+index 0631a4fd..0ece73b0 100644
 --- a/src/json.c
 +++ b/src/json.c
-@@ -1469,6 +1469,49 @@ json_t *nattype_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+@@ -1496,6 +1496,49 @@ json_t *nattype_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
  	return json_pack("{s:o}", "NATTYPE", root);
  }
  
@@ -297,10 +297,10 @@ index 9c7f456a..76f8b528 100644
  {
  	json_t *root, *jexpr = NULL;
 diff --git a/src/netlink_delinearize.c b/src/netlink_delinearize.c
-index 9a85751e..0f7c687d 100644
+index c9de41b8..fe867b4b 100644
 --- a/src/netlink_delinearize.c
 +++ b/src/netlink_delinearize.c
-@@ -1377,6 +1377,86 @@ static void netlink_parse_nattype(struct netlink_parse_ctx *ctx,
+@@ -1371,6 +1371,86 @@ static void netlink_parse_nattype(struct netlink_parse_ctx *ctx,
  	ctx->stmt = stmt;
  }
  
@@ -387,7 +387,7 @@ index 9a85751e..0f7c687d 100644
  static void netlink_parse_synproxy(struct netlink_parse_ctx *ctx,
  				   const struct location *loc,
  				   const struct nftnl_expr *nle)
-@@ -1933,6 +2013,7 @@ static const struct expr_handler netlink_parsers[] = {
+@@ -1929,6 +2009,7 @@ static const struct expr_handler netlink_parsers[] = {
  	{ .name = "xfrm",	.parse = netlink_parse_xfrm },
  	{ .name = "synproxy",	.parse = netlink_parse_synproxy },
  	{ .name = "NATTYPE", .parse = netlink_parse_nattype },
@@ -396,10 +396,10 @@ index 9a85751e..0f7c687d 100644
  
  static int netlink_parse_expr(const struct nftnl_expr *nle,
 diff --git a/src/netlink_linearize.c b/src/netlink_linearize.c
-index 44c4e3a6..4311ced3 100644
+index 929925c7..2959293a 100644
 --- a/src/netlink_linearize.c
 +++ b/src/netlink_linearize.c
-@@ -1303,7 +1303,6 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
+@@ -1308,7 +1308,6 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
  		if (stmt->nat.proto->etype == EXPR_RANGE) {
  			pmax_reg = get_register(ctx, NULL);
  			registers++;
@@ -407,7 +407,7 @@ index 44c4e3a6..4311ced3 100644
  			netlink_gen_expr(ctx, stmt->nat.proto->left, pmin_reg);
  			netlink_gen_expr(ctx, stmt->nat.proto->right, pmax_reg);
  			netlink_put_register(nle, nftnl_reg_pmin, pmin_reg);
-@@ -1334,6 +1333,69 @@ static void netlink_gen_nattype_stmt(struct netlink_linearize_ctx *ctx,
+@@ -1339,6 +1338,69 @@ static void netlink_gen_nattype_stmt(struct netlink_linearize_ctx *ctx,
  	nft_rule_add_expr(ctx, nle, &stmt->location);
  }
  
@@ -477,7 +477,7 @@ index 44c4e3a6..4311ced3 100644
  static void netlink_gen_tproxy_stmt(struct netlink_linearize_ctx *ctx,
  				 const struct stmt *stmt)
  {
-@@ -1696,6 +1758,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
+@@ -1701,6 +1763,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
  		return netlink_gen_nat_stmt(ctx, stmt);
  	case STMT_NATTYPE:
  		return netlink_gen_nattype_stmt(ctx, stmt);
@@ -487,10 +487,10 @@ index 44c4e3a6..4311ced3 100644
  		return netlink_gen_tproxy_stmt(ctx, stmt);
  	case STMT_SYNPROXY:
 diff --git a/src/parser_bison.y b/src/parser_bison.y
-index 7d3e899e..37b4ae63 100644
+index 9c7ac53f..2cda2b0d 100644
 --- a/src/parser_bison.y
 +++ b/src/parser_bison.y
-@@ -633,6 +633,13 @@ int nft_lex(void *, void *, void *);
+@@ -655,6 +655,13 @@ int nft_lex(void *, void *, void *);
  %token FORWARD_IN					"FORWARD_IN"
  %token FORWARD_OUT				"FORWARD_OUT"
  
@@ -504,7 +504,7 @@ index 7d3e899e..37b4ae63 100644
  %token QUEUE			"queue"
  %token QUEUENUM			"num"
  %token BYPASS			"bypass"
-@@ -774,6 +781,8 @@ int nft_lex(void *, void *, void *);
+@@ -803,6 +810,8 @@ int nft_lex(void *, void *, void *);
  %type <val>			chain_stmt_type
  %type <stmt>			nattype_stmt nattype_stmt_alloc
  %destructor { stmt_free($$); }	nattype_stmt nattype_stmt_alloc
@@ -513,7 +513,7 @@ index 7d3e899e..37b4ae63 100644
  
  %type <stmt>			queue_stmt queue_stmt_alloc	queue_stmt_compat
  %destructor { stmt_free($$); }	queue_stmt queue_stmt_alloc	queue_stmt_compat
-@@ -1052,6 +1061,7 @@ close_scope_th		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_TH); };
+@@ -1086,6 +1095,7 @@ close_scope_th		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_TH); };
  close_scope_udp		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDP); };
  close_scope_udplite	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDPLITE); };
  close_scope_nattype : { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_NATTYPE); };
@@ -521,15 +521,15 @@ index 7d3e899e..37b4ae63 100644
  
  close_scope_log		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_LOG); }
  close_scope_synproxy	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_SYNPROXY); }
-@@ -3084,6 +3094,7 @@ stmt			:	verdict_stmt
- 			|	optstrip_stmt
+@@ -3237,6 +3247,7 @@ stmt			:	verdict_stmt
  			|	xt_stmt		close_scope_xt
+ 			|	objref_stmt
  			| nattype_stmt close_scope_nattype
 +			| trigger_stmt close_scope_trigger
  			;
  
  xt_stmt			:	XT	STRING	string
-@@ -3705,6 +3716,15 @@ nattype_stmt_arg		: NATTYPE_MODE NATTYPE_DNAT
+@@ -3734,6 +3745,15 @@ nattype_stmt_arg		: NATTYPE_MODE NATTYPE_DNAT
  			}
  			;
  
@@ -545,7 +545,7 @@ index 7d3e899e..37b4ae63 100644
  tproxy_stmt		:	TPROXY TO stmt_expr
  			{
  				$$ = tproxy_stmt_alloc(&@$);
-@@ -4010,6 +4030,63 @@ nat_stmt_args		:	stmt_expr
+@@ -4033,6 +4053,63 @@ nat_stmt_args		:	stmt_expr
  			}
  			;
  
@@ -610,10 +610,10 @@ index 7d3e899e..37b4ae63 100644
  			|	masq_stmt_alloc
  			;
 diff --git a/src/rule.c b/src/rule.c
-index 533161d3..9a656ec1 100644
+index 9bc160ec..480b2abb 100644
 --- a/src/rule.c
 +++ b/src/rule.c
-@@ -795,6 +795,21 @@ const char *family2str(unsigned int family)
+@@ -801,6 +801,21 @@ const char *family2str(unsigned int family)
  	return "unknown";
  }
  
@@ -636,10 +636,10 @@ index 533161d3..9a656ec1 100644
  {
  	switch (family) {
 diff --git a/src/scanner.l b/src/scanner.l
-index 1d1211e3..a767ffa3 100644
+index d34f6e0a..79911242 100644
 --- a/src/scanner.l
 +++ b/src/scanner.l
-@@ -249,6 +249,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+@@ -251,6 +251,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
  %s SCANSTATE_STMT_LOG
  %s SCANSTATE_STMT_NAT
  %s SCANSTATE_STMT_NATTYPE
@@ -647,7 +647,7 @@ index 1d1211e3..a767ffa3 100644
  %s SCANSTATE_STMT_REJECT
  %s SCANSTATE_STMT_SYNPROXY
  %s SCANSTATE_STMT_TPROXY
-@@ -470,7 +471,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+@@ -472,7 +473,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
  }
  
  "NATTYPE"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_NATTYPE); return NATTYPE; }
@@ -656,7 +656,7 @@ index 1d1211e3..a767ffa3 100644
  	"MODE"			{ return NATTYPE_MODE; }
  	"TYPE"			{ return NATTYPE_TYPE; }
  
-@@ -480,6 +481,15 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+@@ -482,6 +483,15 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
  	"FORWARD_OUT" { return FORWARD_OUT; }
  }
  
@@ -673,10 +673,10 @@ index 1d1211e3..a767ffa3 100644
  	"ll"			{ return LL_HDR; }
  	"nh"			{ return NETWORK_HDR; }
 diff --git a/src/statement.c b/src/statement.c
-index 5fee7281..d568afe2 100644
+index 894bc8ce..700e5e8e 100644
 --- a/src/statement.c
 +++ b/src/statement.c
-@@ -793,6 +793,93 @@ struct stmt *nattype_stmt_alloc(const struct location *loc)
+@@ -786,6 +786,93 @@ struct stmt *nattype_stmt_alloc(const struct location *loc)
  	return stmt;
  }
  
