@@ -1,0 +1,36 @@
+From 4fe985ac6248a2148f5ddcc0b6418426e99d3631 Mon Sep 17 00:00:00 2001
+From: "Kuruva, Jaya Krishna" <quic_jkuruva@quicinc.com>
+Date: Mon, 10 Mar 2025 13:59:22 +0530
+Subject: [PATCH] netifd: Add back upstream added external_device checks
+
+Change-Id: I2fbb77f58e36d72f76172557189811ffbf3991d6
+Signed-off-by: Kuruva, Jaya Krishna <quic_jkuruva@quicinc.com>
+---
+ device.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/device.c b/device.c
+index a0047b7..9f65ca9 100644
+--- a/device.c
++++ b/device.c
+@@ -184,7 +184,8 @@ static int set_device_state(struct device *dev, bool state)
+ 		dev->orig_settings.flags &= dev->settings.flags;
+ 		system_if_apply_settings(dev, &dev->settings, dev->settings.flags);
+ 
+-		ret = system_if_up(dev);
++		if (!dev->external)
++			ret = system_if_up(dev);
+ 		while(ret < 0 && retry <=4 )
+ 		{
+ 			D(DEVICE, "set_device_state: system_if_up failed with ret=%d,errno:%d, sleep 50ms to retry\n", ret, errno);
+@@ -196,6 +197,7 @@ static int set_device_state(struct device *dev, bool state)
+ 
+ 		//system_if_apply_settings_after_up(dev, &dev->settings);
+ 	} else {
++		if (!dev->external)
+ 			system_if_down(dev);
+ 		system_if_apply_settings(dev, &dev->orig_settings, dev->orig_settings.flags);
+ 
+-- 
+2.17.1
+
