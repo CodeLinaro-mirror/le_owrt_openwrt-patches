@@ -1,0 +1,31 @@
+From 17bf430763ac611931b2be421e190bbef030435c Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <quic_huawenc@quicinc.com>
+Date: Wed, 19 Feb 2025 15:10:51 +0800
+Subject: [PATCH] netifd: skip rmnet's parent device
+
+Change-Id: I5b35a59c0d013b90cc9efcadf70c330073cbbf0d
+Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
+---
+ device.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/device.c b/device.c
+index 29745a7..973d283 100644
+--- a/device.c
++++ b/device.c
+@@ -216,9 +216,12 @@ simple_device_set_state(struct device *dev, bool state)
+ 
+ 	pdev = dev->parent.dev;
+ 	if (state && !pdev) {
++		if(strncmp(dev->ifname, "rmnet_eth", strlen("rmnet_eth")) != 0 &&
++		   strncmp(dev->ifname, "rmnet_data", strlen("rmnet_data")) != 0) {
+ 		pdev = system_if_get_parent(dev);
+ 		if (pdev)
+ 			device_add_user(&dev->parent, pdev);
++		}
+ 	}
+ 
+ 	if (pdev) {
+-- 
+2.40.0.windows.1
+

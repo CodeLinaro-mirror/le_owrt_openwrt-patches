@@ -1,4 +1,4 @@
-From ace42f86db8c33c1a3205fa4d712fb7ef54f750f Mon Sep 17 00:00:00 2001
+From b773f34392b78991480a750ac6169dc6a80f3fff Mon Sep 17 00:00:00 2001
 From: Yinxin Sun <quic_yinxsun@quicinc.com>
 Date: Fri, 29 Nov 2024 10:10:04 +0800
 Subject: [PATCH] nftables: Add front-end for NATTYPE
@@ -8,20 +8,22 @@ Add the ability for nftables to deal with kernel NATTYPE module
 
 Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
 ---
- include/json.h            |  2 ++
- include/parser.h          |  1 +
- include/statement.h       | 19 +++++++++++++++++
- src/evaluate.c            | 11 ++++++++++
- src/json.c                | 27 +++++++++++++++++++++++
- src/netlink_delinearize.c | 16 ++++++++++++++
- src/netlink_linearize.c   | 14 ++++++++++++
- src/parser_bison.y        | 45 +++++++++++++++++++++++++++++++++++++++
- src/scanner.l             | 12 +++++++++++
- src/statement.c           | 31 +++++++++++++++++++++++++++
- 10 files changed, 178 insertions(+)
+ include/json.h               |  2 ++
+ include/parser.h             |  1 +
+ include/statement.h          | 19 +++++++++++++++
+ src/evaluate.c               | 11 +++++++++
+ src/json.c                   | 27 ++++++++++++++++++++++
+ src/netlink_delinearize.c    | 16 +++++++++++++
+ src/netlink_linearize.c      | 14 +++++++++++
+ src/parser_bison.y           | 45 ++++++++++++++++++++++++++++++++++++
+ src/scanner.l                | 12 ++++++++++
+ src/statement.c              | 31 +++++++++++++++++++++++++
+ tests/shell/run-tests.sh.rej | 15 ------------
+ 11 files changed, 178 insertions(+), 15 deletions(-)
+ delete mode 100644 tests/shell/run-tests.sh.rej
 
 diff --git a/include/json.h b/include/json.h
-index da605ed9..351c9fab 100644
+index 39be8928..c823de55 100644
 --- a/include/json.h
 +++ b/include/json.h
 @@ -81,6 +81,7 @@ json_t *notrack_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
@@ -32,7 +34,7 @@ index da605ed9..351c9fab 100644
  json_t *reject_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
  json_t *counter_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
  json_t *set_stmt_json(const struct stmt *stmt, struct output_ctx *octx);
-@@ -198,6 +199,7 @@ STMT_PRINT_STUB(tproxy)
+@@ -200,6 +201,7 @@ STMT_PRINT_STUB(tproxy)
  STMT_PRINT_STUB(synproxy)
  STMT_PRINT_STUB(optstrip)
  STMT_PRINT_STUB(xt)
@@ -41,7 +43,7 @@ index da605ed9..351c9fab 100644
  #undef STMT_PRINT_STUB
  #undef EXPR_PRINT_STUB
 diff --git a/include/parser.h b/include/parser.h
-index f79a22f3..87944979 100644
+index 576e5e43..ed7fe26c 100644
 --- a/include/parser.h
 +++ b/include/parser.h
 @@ -84,6 +84,7 @@ enum startcond_type {
@@ -53,7 +55,7 @@ index f79a22f3..87944979 100644
  	PARSER_SC_STMT_SYNPROXY,
  	PARSER_SC_STMT_TPROXY,
 diff --git a/include/statement.h b/include/statement.h
-index 720a6ac2..9baf4e11 100644
+index 9376911b..1f679e7f 100644
 --- a/include/statement.h
 +++ b/include/statement.h
 @@ -4,6 +4,7 @@
@@ -111,10 +113,10 @@ index 720a6ac2..9baf4e11 100644
  		struct optstrip_stmt	optstrip;
  		struct queue_stmt	queue;
 diff --git a/src/evaluate.c b/src/evaluate.c
-index 33e4ac93..ba503e78 100644
+index 593a0140..d4439728 100644
 --- a/src/evaluate.c
 +++ b/src/evaluate.c
-@@ -3865,6 +3865,15 @@ static int stmt_evaluate_nat(struct eval_ctx *ctx, struct stmt *stmt)
+@@ -4199,6 +4199,15 @@ static int stmt_evaluate_nat(struct eval_ctx *ctx, struct stmt *stmt)
  	return 0;
  }
  
@@ -130,7 +132,7 @@ index 33e4ac93..ba503e78 100644
  static int stmt_evaluate_tproxy(struct eval_ctx *ctx, struct stmt *stmt)
  {
  	struct proto_ctx *pctx = eval_proto_ctx(ctx);
-@@ -4393,6 +4402,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
+@@ -4729,6 +4738,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
  		return stmt_evaluate_reject(ctx, stmt);
  	case STMT_NAT:
  		return stmt_evaluate_nat(ctx, stmt);
@@ -140,10 +142,10 @@ index 33e4ac93..ba503e78 100644
  		return stmt_evaluate_tproxy(ctx, stmt);
  	case STMT_QUEUE:
 diff --git a/src/json.c b/src/json.c
-index a119dfc4..9c7f456a 100644
+index b1531ff3..0631a4fd 100644
 --- a/src/json.c
 +++ b/src/json.c
-@@ -1442,6 +1442,33 @@ json_t *nat_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
+@@ -1469,6 +1469,33 @@ json_t *nat_stmt_json(const struct stmt *stmt, struct output_ctx *octx)
  	return json_pack("{s:o}", nat_etype2str(stmt->nat.type), root);
  }
  
@@ -178,10 +180,10 @@ index a119dfc4..9c7f456a 100644
  {
  	json_t *root, *jexpr = NULL;
 diff --git a/src/netlink_delinearize.c b/src/netlink_delinearize.c
-index 9241f466..9a85751e 100644
+index e3d9cfbb..c9de41b8 100644
 --- a/src/netlink_delinearize.c
 +++ b/src/netlink_delinearize.c
-@@ -1362,6 +1362,21 @@ out_err:
+@@ -1356,6 +1356,21 @@ out_err:
  	stmt_free(stmt);
  }
  
@@ -203,7 +205,7 @@ index 9241f466..9a85751e 100644
  static void netlink_parse_synproxy(struct netlink_parse_ctx *ctx,
  				   const struct location *loc,
  				   const struct nftnl_expr *nle)
-@@ -1917,6 +1932,7 @@ static const struct expr_handler netlink_parsers[] = {
+@@ -1913,6 +1928,7 @@ static const struct expr_handler netlink_parsers[] = {
  	{ .name = "flow_offload", .parse = netlink_parse_flow_offload },
  	{ .name = "xfrm",	.parse = netlink_parse_xfrm },
  	{ .name = "synproxy",	.parse = netlink_parse_synproxy },
@@ -212,10 +214,10 @@ index 9241f466..9a85751e 100644
  
  static int netlink_parse_expr(const struct nftnl_expr *nle,
 diff --git a/src/netlink_linearize.c b/src/netlink_linearize.c
-index f5b2d6bb..44c4e3a6 100644
+index 77bc5149..929925c7 100644
 --- a/src/netlink_linearize.c
 +++ b/src/netlink_linearize.c
-@@ -1322,6 +1322,18 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
+@@ -1327,6 +1327,18 @@ static void netlink_gen_nat_stmt(struct netlink_linearize_ctx *ctx,
  	nft_rule_add_expr(ctx, nle, &stmt->location);
  }
  
@@ -234,7 +236,7 @@ index f5b2d6bb..44c4e3a6 100644
  static void netlink_gen_tproxy_stmt(struct netlink_linearize_ctx *ctx,
  				 const struct stmt *stmt)
  {
-@@ -1682,6 +1694,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
+@@ -1687,6 +1699,8 @@ static void netlink_gen_stmt(struct netlink_linearize_ctx *ctx,
  		return netlink_gen_reject_stmt(ctx, stmt);
  	case STMT_NAT:
  		return netlink_gen_nat_stmt(ctx, stmt);
@@ -244,10 +246,10 @@ index f5b2d6bb..44c4e3a6 100644
  		return netlink_gen_tproxy_stmt(ctx, stmt);
  	case STMT_SYNPROXY:
 diff --git a/src/parser_bison.y b/src/parser_bison.y
-index 553ddf97..7d3e899e 100644
+index e2936d10..9c7ac53f 100644
 --- a/src/parser_bison.y
 +++ b/src/parser_bison.y
-@@ -626,6 +626,13 @@ int nft_lex(void *, void *, void *);
+@@ -648,6 +648,13 @@ int nft_lex(void *, void *, void *);
  %token FULLY_RANDOM		"fully-random"
  %token PERSISTENT		"persistent"
  
@@ -261,7 +263,7 @@ index 553ddf97..7d3e899e 100644
  %token QUEUE			"queue"
  %token QUEUENUM			"num"
  %token BYPASS			"bypass"
-@@ -765,6 +772,8 @@ int nft_lex(void *, void *, void *);
+@@ -794,6 +801,8 @@ int nft_lex(void *, void *, void *);
  %type <stmt>			chain_stmt
  %destructor { stmt_free($$); }	chain_stmt
  %type <val>			chain_stmt_type
@@ -270,7 +272,7 @@ index 553ddf97..7d3e899e 100644
  
  %type <stmt>			queue_stmt queue_stmt_alloc	queue_stmt_compat
  %destructor { stmt_free($$); }	queue_stmt queue_stmt_alloc	queue_stmt_compat
-@@ -1042,6 +1051,7 @@ close_scope_type	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_TYPE); };
+@@ -1076,6 +1085,7 @@ close_scope_type	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_TYPE); };
  close_scope_th		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_TH); };
  close_scope_udp		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDP); };
  close_scope_udplite	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_EXPR_UDPLITE); };
@@ -278,16 +280,16 @@ index 553ddf97..7d3e899e 100644
  
  close_scope_log		: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_LOG); }
  close_scope_synproxy	: { scanner_pop_start_cond(nft->scanner, PARSER_SC_STMT_SYNPROXY); }
-@@ -3073,6 +3083,7 @@ stmt			:	verdict_stmt
- 			|	chain_stmt
+@@ -3226,6 +3236,7 @@ stmt			:	verdict_stmt
  			|	optstrip_stmt
  			|	xt_stmt		close_scope_xt
+ 			|	objref_stmt
 +			| nattype_stmt close_scope_nattype
  			;
  
  xt_stmt			:	XT	STRING	string
-@@ -3660,6 +3671,40 @@ nat_stmt_alloc		:	SNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_SNAT); }
- 			|	DNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_DNAT); }
+@@ -3689,6 +3700,40 @@ nat_stmt_alloc		:	SNAT	{ $$ = nat_stmt_alloc(&@$, __NFT_NAT_SNAT); }
+ 			|	DNAT	{ $$ = nat_stmt_alloc(&@$, __NFT_NAT_DNAT); }
  			;
  
 +nattype_stmt		: nattype_stmt_alloc nattype_stmt_args
@@ -328,10 +330,10 @@ index 553ddf97..7d3e899e 100644
  			{
  				$$ = tproxy_stmt_alloc(&@$);
 diff --git a/src/scanner.l b/src/scanner.l
-index c903b8c3..1d1211e3 100644
+index c825fa79..d34f6e0a 100644
 --- a/src/scanner.l
 +++ b/src/scanner.l
-@@ -248,6 +248,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+@@ -250,6 +250,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
  %s SCANSTATE_STMT_FWD
  %s SCANSTATE_STMT_LOG
  %s SCANSTATE_STMT_NAT
@@ -339,7 +341,7 @@ index c903b8c3..1d1211e3 100644
  %s SCANSTATE_STMT_REJECT
  %s SCANSTATE_STMT_SYNPROXY
  %s SCANSTATE_STMT_TPROXY
-@@ -468,6 +469,17 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
+@@ -470,6 +471,17 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
  	"port"			{ return PORT; }
  }
  
@@ -358,10 +360,10 @@ index c903b8c3..1d1211e3 100644
  	"ll"			{ return LL_HDR; }
  	"nh"			{ return NETWORK_HDR; }
 diff --git a/src/statement.c b/src/statement.c
-index 9ca7e208..5fee7281 100644
+index 551cd13f..894bc8ce 100644
 --- a/src/statement.c
 +++ b/src/statement.c
-@@ -762,6 +762,37 @@ struct stmt *nat_stmt_alloc(const struct location *loc,
+@@ -755,6 +755,37 @@ struct stmt *nat_stmt_alloc(const struct location *loc,
  	return stmt;
  }
  
@@ -399,6 +401,27 @@ index 9ca7e208..5fee7281 100644
  const char * const set_stmt_op_names[] = {
  	[NFT_DYNSET_OP_ADD]	= "add",
  	[NFT_DYNSET_OP_UPDATE]	= "update",
+diff --git a/tests/shell/run-tests.sh.rej b/tests/shell/run-tests.sh.rej
+deleted file mode 100644
+index 0a77643e..00000000
+--- a/tests/shell/run-tests.sh.rej
++++ /dev/null
+@@ -1,15 +0,0 @@
+---- run-tests.sh
+-+++ run-tests.sh
+-@@ -565,11 +565,8 @@ feature_probe()
+- 	fi
+- 
+- 	if [ -x "$with_path.sh" ] ; then
+--		echo $with_path
+- 		NFT="$NFT_REAL" $NFT_TEST_UNSHARE_CMD "$with_path.sh" &>/dev/null
+--		RET=$?
+--		echo $?
+--		return $RET
+-+		return $?
+- 	fi
+- 
+- 	return 1
 -- 
 2.34.1
 

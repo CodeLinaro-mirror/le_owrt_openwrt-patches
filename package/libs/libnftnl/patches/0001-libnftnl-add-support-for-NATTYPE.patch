@@ -1,4 +1,4 @@
-From eb615b8bac630a46d27ea647bee1f4cbb1c27934 Mon Sep 17 00:00:00 2001
+From f923d4004798c3cdbbee6de8e07c33dadaa8712a Mon Sep 17 00:00:00 2001
 From: Yinxin Sun <quic_yinxsun@quicinc.com>
 Date: Tue, 26 Nov 2024 17:38:36 +0800
 Subject: [PATCH] libnftnl: add support for NATTYPE
@@ -10,17 +10,17 @@ Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
  include/libnftnl/expr.h             |   6 ++
  include/linux/netfilter/nf_tables.h |  20 ++++
  src/Makefile.am                     |   1 +
- src/expr/nattype.c                  | 150 ++++++++++++++++++++++++++++
+ src/expr/nattype.c                  | 148 ++++++++++++++++++++++++++++
  src/expr_ops.c                      |   2 +
- 5 files changed, 179 insertions(+)
+ 5 files changed, 177 insertions(+)
  create mode 100644 src/expr/nattype.c
 
 diff --git a/include/libnftnl/expr.h b/include/libnftnl/expr.h
-index 9873228..22cb9ae 100644
+index fba1210..498e8b1 100644
 --- a/include/libnftnl/expr.h
 +++ b/include/libnftnl/expr.h
-@@ -152,6 +152,12 @@ enum {
- 	NFTNL_EXPR_NAT_FLAGS,
+@@ -167,6 +167,12 @@ enum {
+ 	__NFTNL_EXPR_NAT_MAX
  };
  
 +enum {
@@ -77,10 +77,10 @@ index 3cd259c..aa28fbf 100644
  		      expr/payload.c	\
 diff --git a/src/expr/nattype.c b/src/expr/nattype.c
 new file mode 100644
-index 0000000..219ceea
+index 0000000..3fc0e45
 --- /dev/null
 +++ b/src/expr/nattype.c
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,148 @@
 +/*
 + * Authors:
 + * 	Yinxsun Sun <quic_yinxsun@quicinc.com>
@@ -213,23 +213,21 @@ index 0000000..219ceea
 +  return offset;
 +}
 +
-+// static struct attr_policy nattype_attr_policy[__NFTNL_EXPR_NATTYPE_MAX] = {
-+// 	[NFTNL_EXPR_NATTYPE_MODE]               = { .maxlen = sizeof(uint32_t)
-+// }, 	[NFTNL_EXPR_NATTYPE_TYPE]               = { .maxlen = sizeof(uint32_t)
-+// },
-+// };
++static struct attr_policy nattype_attr_policy[__NFTNL_EXPR_NATTYPE_MAX] = {
++	[NFTNL_EXPR_NATTYPE_MODE]	= { .maxlen = sizeof(uint32_t) },
++ 	[NFTNL_EXPR_NATTYPE_TYPE]	= { .maxlen = sizeof(uint32_t) },
++};
 +
 +struct expr_ops expr_ops_nattype = {
-+    .name = "NATTYPE",
-+    .alloc_len = sizeof(struct nftnl_expr_nattype),
-+    .max_attr = __NFTNL_EXPR_NATTYPE_MAX - 1,
-+    // .nftnl_max_attr	= __NFTNL_EXPR_NATTYPE_MAX - 1,
-+    // .attr_policy	= nattype_attr_policy,
-+    .set = nftnl_expr_nattype_set,
-+    .get = nftnl_expr_nattype_get,
-+    .parse = nftnl_expr_nattype_parse,
-+    .build = nftnl_expr_nattype_build,
-+    .output = nftnl_expr_nattype_snprintf,
++	.name		= "NATTYPE",
++	.alloc_len	= sizeof(struct nftnl_expr_nattype),
++	.nftnl_max_attr	= __NFTNL_EXPR_NATTYPE_MAX - 1,
++	.attr_policy	= nattype_attr_policy,
++	.set		= nftnl_expr_nattype_set,
++	.get		= nftnl_expr_nattype_get,
++	.parse		= nftnl_expr_nattype_parse,
++	.build		= nftnl_expr_nattype_build,
++	.output		= nftnl_expr_nattype_snprintf,
 +};
 \ No newline at end of file
 diff --git a/src/expr_ops.c b/src/expr_ops.c

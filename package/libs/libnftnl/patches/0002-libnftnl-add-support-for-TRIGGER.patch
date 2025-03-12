@@ -1,4 +1,4 @@
-From 4512ea063cd5898cf7f41e59e883ea69c5d93cd4 Mon Sep 17 00:00:00 2001
+From e4bbed482f5bd7e2bc11fbddf9c6f447603407e6 Mon Sep 17 00:00:00 2001
 From: Yinxin Sun <quic_yinxsun@quicinc.com>
 Date: Fri, 29 Nov 2024 10:17:36 +0800
 Subject: [PATCH] libnftnl: add support for TRIGGER
@@ -10,16 +10,16 @@ Signed-off-by: Yinxin Sun <quic_yinxsun@quicinc.com>
  include/libnftnl/expr.h             |  12 ++
  include/linux/netfilter/nf_tables.h |  32 ++++
  src/Makefile.am                     |   1 +
- src/expr/trigger.c                  | 265 ++++++++++++++++++++++++++++
+ src/expr/trigger.c                  | 275 ++++++++++++++++++++++++++++
  src/expr_ops.c                      |   2 +
- 5 files changed, 312 insertions(+)
+ 5 files changed, 322 insertions(+)
  create mode 100644 src/expr/trigger.c
 
 diff --git a/include/libnftnl/expr.h b/include/libnftnl/expr.h
-index 22cb9ae..d7196d2 100644
+index 498e8b1..f9b288b 100644
 --- a/include/libnftnl/expr.h
 +++ b/include/libnftnl/expr.h
-@@ -158,6 +158,18 @@ enum {
+@@ -173,6 +173,18 @@ enum {
  	__NFTNL_EXPR_NATTYPE_MAX
  };
  
@@ -95,10 +95,10 @@ index aa28fbf..a1ce5af 100644
  		      expr/payload.c	\
 diff --git a/src/expr/trigger.c b/src/expr/trigger.c
 new file mode 100644
-index 0000000..6624a60
+index 0000000..06156e6
 --- /dev/null
 +++ b/src/expr/trigger.c
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,275 @@
 +/*
 + * Authors:
 + * 	Yinxsun Sun <quic_yinxsun@quicinc.com>
@@ -115,11 +115,9 @@ index 0000000..6624a60
 +#include <libnftnl/rule.h>
 +#include <limits.h>
 +#include <linux/netfilter/nf_tables.h>
-+#include <netinet/in.h>
 +#include <stdint.h>
 +#include <stdio.h>
 +#include <string.h>
-+#include <sys/types.h>
 +
 +struct nftnl_expr_trigger {
 +  enum nft_trigger_modes mode;
@@ -354,15 +352,27 @@ index 0000000..6624a60
 +  return offset;
 +}
 +
++static struct attr_policy trigger_attr_policy[__NFTNL_EXPR_TRIGGER_MAX] = {
++	[NFTNL_EXPR_TRIGGER_MODE]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_TPROTO]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_FPROTO]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_TIMER]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_TPORTS_MIN]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_TPORTS_MAX]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_FPORTS_MIN]	= { .maxlen = sizeof(uint32_t) },
++	[NFTNL_EXPR_TRIGGER_FPORTS_MAX]	= { .maxlen = sizeof(uint32_t) },
++};
++
 +struct expr_ops expr_ops_trigger = {
-+  .name = "TRIGGER",
-+  .alloc_len = sizeof(struct nftnl_expr_trigger),
-+  .max_attr = NFTA_TRIGGER_MAX,
-+  .set = nftnl_expr_trigger_set,
-+  .get = nftnl_expr_trigger_get,
-+  .parse = nftnl_expr_trigger_parse,
-+  .build = nftnl_expr_trigger_build,
-+  .output = nftnl_expr_trigger_snprintf,
++	.name		= "TRIGGER",
++	.alloc_len	= sizeof(struct nftnl_expr_trigger),
++	.nftnl_max_attr	= __NFTNL_EXPR_TRIGGER_MAX - 1,
++	.attr_policy	= trigger_attr_policy,
++	.set		= nftnl_expr_trigger_set,
++	.get		= nftnl_expr_trigger_get,
++	.parse		= nftnl_expr_trigger_parse,
++	.build		= nftnl_expr_trigger_build,
++	.output		= nftnl_expr_trigger_snprintf,
 +};
 \ No newline at end of file
 diff --git a/src/expr_ops.c b/src/expr_ops.c
