@@ -1855,6 +1855,10 @@ interface_routing() {
 						else
 							try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 						fi
+						#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+						if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+							echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
+						fi
 					fi
 				fi
 			else
@@ -1963,6 +1967,10 @@ interface_routing() {
 						else
 							try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 						fi
+						#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+						if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+							echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
+						fi
 					fi
 				fi
 			else
@@ -1998,6 +2006,10 @@ interface_routing() {
 						try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv6Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 					else
 						try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
+					fi
+					#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+					if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+						echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
 					fi
 				fi
 			fi
