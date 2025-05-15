@@ -1,0 +1,38 @@
+#!/bin/sh
+#SPDX-License-Identifier: AGPL-3.0-or-later
+#Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+
+#file is derived from https://github.com/stangri/pbr/blob/51332a93f2899ee630a99522e1ed46cbf884050d/files/etc/hotplug.d/iface/70-pbr
+
+#source pbr file
+. /etc/data/qcmapPbrConfig.sh
+
+if [ -x /etc/init.d/pbr ] && [ $(uci get pbr.config.enabled) = "1" ]; then
+	if echo $INTERFACE | grep wan; then
+		num_rmnet=$(ifconfig | grep -c "rmnet_data")
+		pbr_status=$(/etc/init.d/pbr start is_running)
+		logger $(basename "$0")":pbr:"$LINENO": pbr status: $pbr_status num rmnet: $num_rmnet"
+		if echo $ACTION | grep ifup; then
+			wan_up=$(grep -w "${INTERFACE}.up='1'" /tmp/state/network -c)
+			if [ $wan_up -eq 1 ]; then
+				#If first wan coming up start pbr
+				if [ $pbr_status = "stopped" ]; then
+					/etc/data/qcmapPbrConfig.sh start_pbr
+				#If addional wan coming up reload pbr
+				elif [ $num_rmnet -gt 1 ] || [ $pbr_status = "started" ]; then
+					/etc/init.d/pbr start on_interface_reload $INTERFACE
+					/etc/data/qcmapPbrConfig.sh delete_conntrack_on_wan_event_pbr $INTERFACE
+				fi
+			fi
+		elif echo $ACTION | grep ifdown; then
+			#If last wan going down stop pbr
+			if [ $num_rmnet -eq 0 ] && [ $pbr_status != "stopped" ]; then
+				/etc/data/qcmapPbrConfig.sh stop_pbr
+			#If additional wan going down reload pbr
+			elif [ $num_rmnet -gt 0 ] && [ $pbr_status != "stopped" ]; then
+				/etc/init.d/pbr start on_interface_reload $INTERFACE
+				/etc/data/qcmapPbrConfig.sh delete_conntrack_on_wan_event_pbr $INTERFACE
+			fi
+		fi
+	fi
+fi
