@@ -724,7 +724,7 @@ nft_file() {
 					> "$nftPermFile"
 					#QCOM_SPECIFIC FW4 config include runs as script so need to add "nft" to each line
 					tail -n +2 "$nftTempFileCombined" | while read -r line; do
-						echo "nft $line" >> "$nftPermFile"
+						echo "nft '$line'" >> "$nftPermFile"
 					done
 					output_okn
 				else
