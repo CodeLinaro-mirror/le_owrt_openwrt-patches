@@ -2444,7 +2444,8 @@ start_service() {
 			fi
 			nft_file 'install'
 			resolver 'init_end'
-			! nft_file 'exists' && resolver 'compare_hash' && resolver 'restart'
+			#UPSTREAM_BUG Always restart dnsmasq when pbr reloads to ensure new fqdn configs are read
+			resolver 'restart'
 			#QCOM_NEW_FEATURE Modified to clear any duplicate dscp rules that were added (only keep what is in pbr fw4 inlcude file)
 			fw4 reload
 		;;
@@ -2515,7 +2516,7 @@ start_service() {
 			nft_file 'install'
 			resolver 'init_end'
 			#UPSTREAM_BUG Always restart dnsmasq when pbr starts to ensure dnsmasq cache is built again
-			! nft_file 'exists' && resolver 'restart'
+			resolver 'restart'
 		;;
 	esac
 
