@@ -1,0 +1,120 @@
+From 0bc235a628467bf8dbd3b8f70296eef89e5e1f33 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <huawenc@qti.qualcomm.com>
+Date: Wed, 7 May 2025 15:16:23 +0800
+Subject: [PATCH] netifd: add support for vlan range on bridge-vlan
+
+Change-Id: Ib6e0ca30e639ddf09326fd143ec35675438ef36b
+Signed-off-by: HuaWen CHEN <huawenc@qti.qualcomm.com>
+---
+ bridge.c       | 10 ++++++++--
+ config.c       | 11 +++++++++++
+ device.h       |  1 +
+ system-linux.c |  2 ++
+ 4 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/bridge.c b/bridge.c
+index dca7036..7892c37 100644
+--- a/bridge.c
++++ b/bridge.c
+@@ -208,7 +208,10 @@ __bridge_set_member_vlan(struct bridge_member *bm, struct bridge_vlan *vlan,
+ 	if (bm->pvid == vlan->vid)
+ 		flags |= BRVLAN_F_PVID;
+ 
+-	system_bridge_vlan(port->ifname, vlan->vid, -1, add, flags);
++	if (vlan->vid_end != 0)
++		system_bridge_vlan(port->ifname, vlan->vid, vlan->vid_end, add, flags);
++	else
++		system_bridge_vlan(port->ifname, vlan->vid, -1, add, flags);
+ }
+ 
+ static void
+@@ -237,7 +240,10 @@ bridge_set_local_vlan(struct bridge_state *bst, struct bridge_vlan *vlan, bool a
+ 	if (!vlan->local && add)
+ 		return;
+ 
+-	system_bridge_vlan(bst->dev.ifname, vlan->vid, -1, add, BRVLAN_F_SELF);
++	if (vlan->vid_end != 0)
++		system_bridge_vlan(bst->dev.ifname, vlan->vid, vlan->vid_end, add, BRVLAN_F_SELF);
++	else
++		system_bridge_vlan(bst->dev.ifname, vlan->vid, -1, add, BRVLAN_F_SELF);
+ }
+ 
+ static void
+diff --git a/config.c b/config.c
+index 5530050..6b2e6c0 100644
+--- a/config.c
++++ b/config.c
+@@ -309,6 +309,7 @@ config_parse_vlan(struct device *dev, struct uci_section *s)
+ {
+ 	enum {
+ 		BRVLAN_ATTR_VID,
++		BRVLAN_ATTR_VID_END,
+ 		BRVLAN_ATTR_LOCAL,
+ 		BRVLAN_ATTR_PORTS,
+ 		BRVLAN_ATTR_ALIAS,
+@@ -316,6 +317,7 @@ config_parse_vlan(struct device *dev, struct uci_section *s)
+ 	};
+ 	static const struct blobmsg_policy vlan_attrs[__BRVLAN_ATTR_MAX] = {
+ 		[BRVLAN_ATTR_VID] = { "vlan", BLOBMSG_TYPE_INT32 },
++		[BRVLAN_ATTR_VID_END] = { "vlan_end", BLOBMSG_TYPE_INT32 },
+ 		[BRVLAN_ATTR_LOCAL] = { "local", BLOBMSG_TYPE_BOOL },
+ 		[BRVLAN_ATTR_PORTS] = { "ports", BLOBMSG_TYPE_ARRAY },
+ 		[BRVLAN_ATTR_ALIAS] = { "alias", BLOBMSG_TYPE_ARRAY },
+@@ -334,6 +336,7 @@ config_parse_vlan(struct device *dev, struct uci_section *s)
+ 	struct bridge_vlan_port *port;
+ 	struct bridge_vlan *vlan;
+ 	unsigned int vid;
++	unsigned int vid_end=0;
+ 	const char *val;
+ 	char *name_buf;
+ 	int name_len = 0;
+@@ -355,6 +358,13 @@ config_parse_vlan(struct device *dev, struct uci_section *s)
+ 	if (!vid || vid > 4095)
+ 		return;
+ 
++	if(tb[BRVLAN_ATTR_VID_END])
++	{
++		vid_end = blobmsg_get_u32(tb[BRVLAN_ATTR_VID_END]);
++		if (!vid_end || vid_end > 4095 || vid_end<vid)
++			return;
++	}
++
+ 	blobmsg_for_each_attr(cur, tb[BRVLAN_ATTR_PORTS], rem) {
+ 		name_len += strlen(blobmsg_get_string(cur)) + 1;
+ 		n_ports++;
+@@ -365,6 +375,7 @@ config_parse_vlan(struct device *dev, struct uci_section *s)
+ 		return;
+ 
+ 	vlan->vid = vid;
++	vlan->vid_end = vid_end;
+ 	vlan->local = true;
+ 	if (tb[BRVLAN_ATTR_LOCAL])
+ 		vlan->local = blobmsg_get_bool(tb[BRVLAN_ATTR_LOCAL]);
+diff --git a/device.h b/device.h
+index 79f2d89..2bf7157 100644
+--- a/device.h
++++ b/device.h
+@@ -328,6 +328,7 @@ struct bridge_vlan {
+ 	struct list_head hotplug_ports;
+ 
+ 	uint16_t vid;
++	uint16_t vid_end;
+ 	bool local;
+ 	bool pending;
+ };
+diff --git a/system-linux.c b/system-linux.c
+index 0499bf4..21eddda 100644
+--- a/system-linux.c
++++ b/system-linux.c
+@@ -1041,6 +1041,8 @@ int system_bridge_vlan(const char *iface, uint16_t vid, int16_t vid_end, bool ad
+ 	int index;
+ 	int ret = 0;
+ 
++	netifd_log_message(L_DEBUG, "system_bridge_vlan: for %s vlan[%d, %d], add=%d, vflags=%d\n", iface, vid, vid_end, add, vflags);
++
+ 	index = if_nametoindex(iface);
+ 	if (!index)
+ 		return -1;
+-- 
+2.40.0.windows.1
+

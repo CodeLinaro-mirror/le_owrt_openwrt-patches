@@ -724,7 +724,7 @@ nft_file() {
 					> "$nftPermFile"
 					#QCOM_SPECIFIC FW4 config include runs as script so need to add "nft" to each line
 					tail -n +2 "$nftTempFileCombined" | while read -r line; do
-						echo "nft $line" >> "$nftPermFile"
+						echo "nft '$line'" >> "$nftPermFile"
 					done
 					output_okn
 				else
@@ -1855,6 +1855,10 @@ interface_routing() {
 						else
 							try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 						fi
+						#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+						if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+							echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
+						fi
 					fi
 				fi
 			else
@@ -1963,6 +1967,10 @@ interface_routing() {
 						else
 							try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 						fi
+						#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+						if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+							echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
+						fi
 					fi
 				fi
 			else
@@ -1998,6 +2006,10 @@ interface_routing() {
 						try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv6Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
 					else
 						try nft insert rule inet "$nftTable" "${nftPrefix}_prerouting iifname "${ifname}" ${nftIPv4Flag} dscp set ${dl_dscp} comment "${iface}"" || s=1
+					fi
+					#QCOM_NEW_FEATURE Write to /ecm/defunct_by_iface
+					if [ -f /proc/sys/net/ecm/defunct_by_iface ]; then
+						echo "${ifname}" > /proc/sys/net/ecm/defunct_by_iface
 					fi
 				fi
 			fi
@@ -2444,7 +2456,8 @@ start_service() {
 			fi
 			nft_file 'install'
 			resolver 'init_end'
-			! nft_file 'exists' && resolver 'compare_hash' && resolver 'restart'
+			#UPSTREAM_BUG Always restart dnsmasq when pbr reloads to ensure new fqdn configs are read
+			resolver 'restart'
 			#QCOM_NEW_FEATURE Modified to clear any duplicate dscp rules that were added (only keep what is in pbr fw4 inlcude file)
 			fw4 reload
 		;;
@@ -2515,7 +2528,7 @@ start_service() {
 			nft_file 'install'
 			resolver 'init_end'
 			#UPSTREAM_BUG Always restart dnsmasq when pbr starts to ensure dnsmasq cache is built again
-			! nft_file 'exists' && resolver 'restart'
+			resolver 'restart'
 		;;
 	esac
 
