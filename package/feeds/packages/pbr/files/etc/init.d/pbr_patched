@@ -2292,12 +2292,13 @@ user_file_process() {
 	fi
 }
 
-boot() {
-	nft_file 'delete'
-	ubus -t 30 wait_for network.interface 2>/dev/null
-	pbr_boot_flag=1
-	rc_procd start_service 'on_boot' && service_started 'on_boot'
-}
+#QCOM_SPECIFIC Commenting out as pbr should start with hotplug (also to avoid nft_file 'delete' race
+#boot() {
+#	nft_file 'delete'
+#	ubus -t 30 wait_for network.interface 2>/dev/null
+#	pbr_boot_flag=1
+#	rc_procd start_service 'on_boot' && service_started 'on_boot'
+#}
 
 on_firewall_reload() { 
 	if [ ! -e "$packageLockFile" ]; then
