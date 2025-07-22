@@ -31,7 +31,7 @@ index 2843d92..69503f3 100644
 +					? 'mark or ' + fw4.hex(rule.set_xmark.mark)
 +					: (rule.set_xmark.mask == 0)
 +						? 'mark xor ' + fw4.hex(rule.set_xmark.mark)
-+						: 'mark and ' + fw4.hex(~r.set_xmark.mask & 0xFFFFFFFF) + ' xor ' + fw4.hex(r.set_xmark.mark)
++						: 'mark and ' + fw4.hex(~rule.set_xmark.mask & 0xFFFFFFFF) + ' xor ' + fw4.hex(rule.set_xmark.mark)
 +	}} {%+
       elif (rule.target == "dscp"): -%}
  	{{ fw4.ipproto(rule.family) }} dscp set {{ fw4.hex(rule.set_dscp.dscp) }} {%+
