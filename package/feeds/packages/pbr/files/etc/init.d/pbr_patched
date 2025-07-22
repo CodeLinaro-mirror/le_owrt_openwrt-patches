@@ -799,7 +799,29 @@ nftset() {
 			[ -n "$ipv6_enabled" ] || unset nftset6
 			# shellcheck disable=SC2086
 			#UPSTREAM_BUG Added to support pbr-iptables physdev functionality with nftables
-			echo "nftset=/${param}/4#inet#${nftTable}#${nftset4}${nftset6:+,6#inet#${nftTable}#$nftset6},4#bridge#${packageName}#${nftset4}${nftset6:+,6#bridge#${packageName}#$nftset6} # $comment" | tee -a $dnsmasqFileList && ipv4_error=0
+			for dnsmasqFile in $dnsmasqFileList; do
+				#QCOM_NEW_FEATURE Modifying to add all nftsets with same param to one command
+				#QCOM_NEW_FEATURE Modifying to only add the nftset for the corresponding ip_family
+				nftset_present=$(grep -s -w $param "$dnsmasqFile")
+				if [ -n "$nftset_present" ]; then
+					left_comm=$(echo "$nftset_present" | awk -F' ' '{print $1}')
+					right_comm=$(echo "$nftset_present" | awk -F' ' '{ for (i = 2; i <= NF; i++) printf $i " " }')
+					right_comm=$(echo "$right_comm" | awk -F':' '{print $1}')
+					right_comm="${right_comm},${comment}"
+					if is_wan6 $iface; then
+						new_set="${left_comm},6#inet#${nftTable}#${nftset6},6#bridge#${packageName}#${nftset6} ${right_comm}"
+					else
+						new_set="${left_comm},4#inet#${nftTable}#${nftset4},4#bridge#${packageName}#${nftset4} ${right_comm}"
+					fi
+					sed -i "\\@$nftset_present@c$new_set" "$dnsmasqFile"  && ipv4_error=0
+				else
+					if is_wan6 $iface; then
+						echo "nftset=/${param}/6#inet#${nftTable}#${nftset6},6#bridge#${packageName}#${nftset6} # $comment" >> "$dnsmasqFile" && ipv4_error=0
+					else
+						echo "nftset=/${param}/4#inet#${nftTable}#${nftset4},4#bridge#${packageName}#${nftset4} # $comment" >> "$dnsmasqFile" && ipv4_error=0
+					fi
+				fi
+			done
 		;;
 		create)
 			case "$type" in
@@ -2292,12 +2314,13 @@ user_file_process() {
 	fi
 }
 
-boot() {
-	nft_file 'delete'
-	ubus -t 30 wait_for network.interface 2>/dev/null
-	pbr_boot_flag=1
-	rc_procd start_service 'on_boot' && service_started 'on_boot'
-}
+#QCOM_SPECIFIC Commenting out as pbr should start with hotplug (also to avoid nft_file 'delete' race
+#boot() {
+#	nft_file 'delete'
+#	ubus -t 30 wait_for network.interface 2>/dev/null
+#	pbr_boot_flag=1
+#	rc_procd start_service 'on_boot' && service_started 'on_boot'
+#}
 
 on_firewall_reload() { 
 	if [ ! -e "$packageLockFile" ]; then
