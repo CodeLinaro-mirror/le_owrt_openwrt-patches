@@ -1,0 +1,36 @@
+From aba08f148714ea3c0d4e919dd5af5407b2de362d Mon Sep 17 00:00:00 2001
+From: Huang Chenming <chenhuan@qti.qualcomm.com>
+Date: Wed, 16 Jul 2025 13:47:36 +0530
+Subject: [PATCH] openssl-3.0.16: Load legacy provider by default in
+ openssl.cnf
+
+Signed-off-by: Huang Chenming <chenhuan@qti.qualcomm.com>
+---
+ apps/openssl.cnf | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/apps/openssl.cnf b/apps/openssl.cnf
+index 469e7fc..ab98bdc 100644
+--- a/apps/openssl.cnf
++++ b/apps/openssl.cnf
+@@ -57,6 +57,7 @@ engines = engines_sect
+ # List of providers to load
+ [provider_sect]
+ default = default_sect
++legacy = legacy_sect
+ .include /var/etc/ssl/providers.cnf
+ 
+ # The fips section name should match the section name inside the
+@@ -74,6 +75,9 @@ default = default_sect
+ [default_sect]
+ activate = 1
+ 
++[legacy_sect]
++activate = 1
++
+ [engines_sect]
+ .include /var/etc/ssl/engines.cnf
+ 
+-- 
+2.17.1
+
