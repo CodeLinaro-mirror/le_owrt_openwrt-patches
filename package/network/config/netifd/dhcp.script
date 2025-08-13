@@ -105,6 +105,7 @@ deconfig_backhaul() {
 	    # file /tmp/ipv4config.$INTERFACE will used by backhaulCommonConfig.sh
 	    # and then delete internal by backhaulCommonConfig.sh to ensure check backhaul active correct
 		/etc/data/backhaulCommonConfig.sh switch_bh $INTERFACE 0
+		rm /tmp/ipv4config.$INTERFACE
 	fi
 }
 
