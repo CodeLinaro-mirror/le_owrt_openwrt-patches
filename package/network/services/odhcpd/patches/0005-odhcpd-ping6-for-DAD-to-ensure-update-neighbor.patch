@@ -1,0 +1,39 @@
+From 3ecbcf7b160b3aaec81196e2c3b345abf9678a93 Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <huawenc@qti.qualcomm.com>
+Date: Wed, 17 Sep 2025 10:11:09 +0800
+Subject: [PATCH] odhcpd: ping6 for DAD to ensure update neighbor
+
+In some linux client, it not send unsolicated NA after DAD.
+Initiate ping6 to trigger NS/NA then ensure ipv6 neigbhor be update.
+
+Change-Id: I95cd707a710d6ace41fbfe2e4780510c2dda1545
+---
+ src/ndp.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/ndp.c b/src/ndp.c
+index ed93ff4..4a557d2 100644
+--- a/src/ndp.c
++++ b/src/ndp.c
+@@ -806,8 +806,16 @@ static void handle_solicit(void *addr, void *data, size_t len,
+ 
+ 	if (req->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_SOLICIT)
+ 	{
+-	inet_ntop(AF_INET6, &req->nd_ns_target, ipbuf, sizeof(ipbuf));
+-	syslog(LOG_DEBUG, "Got a NS for %s on %s", ipbuf, iface->name);
++		inet_ntop(AF_INET6, &req->nd_ns_target, ipbuf, sizeof(ipbuf));
++		syslog(LOG_DEBUG, "Got a NS for %s on %s", ipbuf, iface->name);
++		if(ns_is_dad)
++		{
++			/*
++			* Initiate a ping6 for dad_packet to trigger NS/NA then ensure neighbor table be update.
++			*/
++			syslog(LOG_DEBUG, "Received a dad_packet for ip %s on iface %s", ipbuf, iface->name);
++			ping6(&req->nd_ns_target, iface);
++		}
+ 	}
+ 	else if (req->nd_ns_hdr.icmp6_type == ND_NEIGHBOR_ADVERT)
+ 	{
+-- 
+2.43.0
+
