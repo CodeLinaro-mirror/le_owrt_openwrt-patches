@@ -225,8 +225,9 @@ deconfig_backhaul_v6() {
 	echo " deconfig_backhaul for /tmp/ipv6config.$intf_name"
 	if [ -f /tmp/ipv6config.$intf_name ]; then
 	  /etc/data/backhaulCommonConfig.sh switch_bh_v6 $intf_name 0
-	  rm /tmp/ipv6config.$intf_name
 	fi
+	# File /tmp/ipv4config.$INTERFACE will be deleted by backhaulCommonConfig.sh
+
 }
 
 setup_backhaul_v6() {
