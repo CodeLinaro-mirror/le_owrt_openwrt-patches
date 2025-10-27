@@ -1,4 +1,4 @@
-From 8c9d2a896c2267ace5605e945a53f7a6295e5bef Mon Sep 17 00:00:00 2001
+From cadda922d5506019c8fc041e3d79fdaf39648b2b Mon Sep 17 00:00:00 2001
 From: HuaWen CHEN <quic_huawenc@quicinc.com>
 Date: Fri, 15 Mar 2024 12:53:27 +0800
 Subject: [PATCH] odhcpd: Add support for IPV6 NS DAD packet forwarding logic
@@ -9,9 +9,9 @@ towards Modem to address a potential IPv6 address conflict.
 Signed-off-by: aryamali <quic_aryamali@quicinc.com>
 ---
  src/config.c |   8 +-
- src/ndp.c    | 358 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/ndp.c    | 366 ++++++++++++++++++++++++++++++++++++++++++++++++++-
  src/odhcpd.h |  15 +++
- 3 files changed, 379 insertions(+), 2 deletions(-)
+ 3 files changed, 386 insertions(+), 3 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
 index 62d4857..098fa4a 100644
@@ -61,7 +61,7 @@ index 62d4857..098fa4a 100644
  		INIT_LIST_HEAD(&iface->ia_assignments);
  		INIT_LIST_HEAD(&iface->dhcpv4_assignments);
 diff --git a/src/ndp.c b/src/ndp.c
-index 0ec6fed..76e139d 100644
+index 0ec6fed..0487dc1 100644
 --- a/src/ndp.c
 +++ b/src/ndp.c
 @@ -29,6 +29,11 @@
@@ -110,7 +110,7 @@ index 0ec6fed..76e139d 100644
  static struct netevent_handler ndp_netevent_handler = { .cb = ndp_netevent_cb, };
  
  /* Initialize NDP-proxy */
-@@ -65,6 +89,255 @@ int ndp_init(void)
+@@ -65,16 +89,265 @@ int ndp_init(void)
  	return ret;
  }
  
@@ -122,7 +122,6 @@ index 0ec6fed..76e139d 100644
 +	char ipbuff[INET6_ADDRSTRLEN];
 +	inet_ntop(AF_INET6, &icmp6->nd_ns_target, ipbuff, sizeof(ipbuff));
 +
-+	netlink_setup_proxy_neigh(&icmp6->nd_ns_target, iface->ifindex, true);
 +	netlink_setup_route(&icmp6->nd_ns_target, 128, iface->ifindex, NULL, 1024, true);
 +	netlink_dump_neigh_table(false);
 +}
@@ -366,6 +365,18 @@ index 0ec6fed..76e139d 100644
  int ndp_setup_interface(struct interface *iface, bool enable)
  {
  	int ret = 0, procfd;
+ 	bool dump_neigh = false;
+ 	char procbuf[64];
+ 
+-	enable = enable && (iface->ndp == MODE_RELAY);
++	enable = (enable && (iface->ndp == MODE_RELAY)) || (config.dad_forward && iface->master);
+ 
+ 	snprintf(procbuf, sizeof(procbuf), "/proc/sys/net/ipv6/conf/%s/proxy_ndp", iface->ifname);
+ 	procfd = open(procbuf, O_WRONLY);
++	syslog(LOG_DEBUG, "ndp_setup_interface %s(enable:%d), config.dad_forward:%d, iface->master %d", iface->ifname, enable, config.dad_forward, iface->master);
+ 
+ 	if (procfd < 0) {
+ 		ret = -1;
 @@ -86,6 +359,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  		iface->ndp_ping_fd = -1;
  	}
@@ -434,7 +445,19 @@ index 0ec6fed..76e139d 100644
  	}
  
  	if (procfd >= 0)
-@@ -350,17 +651,72 @@ static void handle_solicit(void *addr, void *data, size_t len,
+@@ -339,6 +640,11 @@ static void handle_solicit(void *addr, void *data, size_t len,
+ 	/* Don't process solicit messages on non relay interfaces
+ 	 * Don't forward any non-DAD solicitation for external ifaces
+ 	 * TODO: check if we should even forward DADs for them */
++	if(config.dad_forward && iface->master)
++	{
++		syslog(LOG_DEBUG, "Handle NA message for DAD forward master");
++	}
++	else
+ 	if (iface->ndp != MODE_RELAY || (iface->external && !ns_is_dad))
+ 		return;
+ 
+@@ -350,17 +656,73 @@ static void handle_solicit(void *addr, void *data, size_t len,
  			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
  		return; /* Invalid target */
  
@@ -465,6 +488,7 @@ index 0ec6fed..76e139d 100644
 +		if(memcmp(&all_hosts_in6_addr, &ip6->ip6_dst, sizeof(ip6->ip6_dst)) == 0)
 +		{
 +			uint8_t slave_mac[6];
++			struct nd_neighbor_advert *adv = (struct nd_neighbor_advert*)&ip6[1];
 +			/* check and forward dad packet to master*/
 +			avl_for_each_element(&interfaces, c, avl) {
 +				if((c->master == 0) && (c->ndp == MODE_RELAY))
@@ -473,7 +497,7 @@ index 0ec6fed..76e139d 100644
 +					syslog(LOG_DEBUG, "QCMAP#handle_solicit#Send DAD-Response for target addr %s on %s ",
 +							ipbuf, c->name);
 +					odhcpd_get_mac(c, slave_mac);
-+					send_dad_na(&all_hosts_in6_addr, c, &ip6->ip6_src, slave_mac);
++					send_dad_na(&all_hosts_in6_addr, c, &(adv->nd_na_target), slave_mac);
 +				}
 +			}
 +		}
