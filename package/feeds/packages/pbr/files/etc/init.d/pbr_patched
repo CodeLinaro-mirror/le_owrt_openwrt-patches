@@ -1925,7 +1925,6 @@ interface_routing() {
 				if [ -z "$gw4" ]; then
 					try ip -4 route add unreachable default table "$tid" || ipv4_error=1
 				else
-					try ip -4 route add default via "$gw4" dev "$dev" table "$tid" >/dev/null 2>&1 || ipv4_error=1
 					mtu=$(uci get network.$iface.mtu)
 					if ! is_wan6 $iface; then
 						if [ -z $mtu ]; then
