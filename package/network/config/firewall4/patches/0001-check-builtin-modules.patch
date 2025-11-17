@@ -1,0 +1,73 @@
+This patch file is from Qualcomm Technologies, Inc. and is provided under the following license:
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 1429fe82ee6c5d6ac5a0cb8662ed17cbcc4fb6c9 Mon Sep 17 00:00:00 2001
+From: Anvitha Nandigam <anandiga@qti.qualcomm.com>
+Date: Thu, 30 Oct 2025 18:30:54 +0530
+Subject: [PATCH] check-builtin-modules
+
+This patch checks for built in modules from proc kernel
+config for helpers
+
+Signed-off-by: Anvitha Nandigam<anandiga@qti.qualcomm.com>
+
+Change-Id: Idd6df84946e4a97bd1b57778955373c12f986a26
+---
+ root/usr/share/ucode/fw4.uc | 41 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+index 690deb0..93eb440 100644
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -1934,7 +1934,46 @@ return {
+ 			return;
+ 		}
+
+-		helper.available = (fs.stat(`/sys/module/${helper.module}`)?.type == "directory");
++		// Check if module is available as loadable module or built-in
++		let module_available = false;
++
++		// First check if it's a loadable module in /sys/module/
++		if (fs.stat(`/sys/module/${helper.module}`)?.type == "directory") {
++			module_available = true;
++		}
++		else {
++			// Check if module is built-in by reading /proc/config.gz
++			// Convert module name to config option (e.g., nf_conntrack_pptp -> CONFIG_NF_CONNTRACK_PPTP)
++			let config_name = "CONFIG_" + uc(replace(helper.module, /-/g, "_"));
++
++			// Try to read kernel config from /proc/config.gz
++			let config_content = null;
++			try {
++				let pipe = fs.popen("zcat /proc/config.gz 2>/dev/null");
++				if (pipe) {
++					config_content = pipe.read("all");
++					pipe.close();
++				}
++			} catch(e) {}
++
++			// Check if the config option is set to 'y' (built-in)
++			if (config_content && index(config_content, config_name + "=y") >= 0) {
++				module_available = true;
++
++				// For PPTP helper, also check if GRE protocol support is available
++				// PPTP requires CONFIG_NF_CT_PROTO_GRE to be enabled
++				if (helper.name == "pptp") {
++					if (index(config_content, "CONFIG_NF_CT_PROTO_GRE=y") >= 0) {
++						module_available = true;
++					}
++					else {
++						module_available = false;
++					}
++				}
++			}
++		}
++
++		helper.available = module_available;
+
+ 		push(this.state.helpers ||= [], helper);
+ 	},
+--
+2.34.1
+

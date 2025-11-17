@@ -1,7 +1,7 @@
-From bfa8b5d2c7c001c9049f50157c1480a719591250 Mon Sep 17 00:00:00 2001
+From 895410199956fd9ad7b8d1c8de551884e3f15ba9 Mon Sep 17 00:00:00 2001
 From: HuaWen CHEN <quic_huawenc@quicinc.com>
 Date: Fri, 15 Mar 2024 13:00:59 +0800
-Subject: [PATCH 2/4] odhcpd: add support bridge mode
+Subject: [PATCH] odhcpd: add support bridge mode
 
 Signed-off-by: HuaWen CHEN <quic_huawenc@quicinc.com>
 ---
@@ -43,7 +43,7 @@ index 098fa4a..cd9f808 100644
  
  err:
 diff --git a/src/ndp.c b/src/ndp.c
-index 3c40da5..ce424af 100644
+index 0487dc1..ed93ff4 100644
 --- a/src/ndp.c
 +++ b/src/ndp.c
 @@ -72,6 +72,18 @@ struct sock_filter bpf_ns_na[] =
@@ -83,7 +83,7 @@ index 3c40da5..ce424af 100644
  		{
  			//need receive NA message from master in case DAD forward
  			if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
-@@ -627,6 +641,140 @@ static void send_na(struct in6_addr *to_addr,
+@@ -623,6 +637,140 @@ static void send_na(struct in6_addr *to_addr,
  	odhcpd_send(iface->ndp_ping_fd, &dest, &iov, 1, iface);
  }
  
@@ -224,7 +224,7 @@ index 3c40da5..ce424af 100644
  /* Handle solicitations */
  static void handle_solicit(void *addr, void *data, size_t len,
  		struct interface *iface, _unused void *dest)
-@@ -650,7 +798,7 @@ static void handle_solicit(void *addr, void *data, size_t len,
+@@ -651,7 +799,7 @@ static void handle_solicit(void *addr, void *data, size_t len,
  	if (len < sizeof(*ip6) + sizeof(*req))
  		return; // Invalid total length
  
@@ -233,7 +233,7 @@ index 3c40da5..ce424af 100644
  			IN6_IS_ADDR_LOOPBACK(&req->nd_ns_target) ||
  			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
  		return; /* Invalid target */
-@@ -723,6 +871,50 @@ static void handle_solicit(void *addr, void *data, size_t len,
+@@ -725,6 +873,50 @@ static void handle_solicit(void *addr, void *data, size_t len,
  		}
  	}
  
@@ -411,5 +411,5 @@ index 7f5658b..21f7d4f 100644
  	}
  }
 -- 
-2.41.0.windows.3
+2.40.0.windows.1
 
