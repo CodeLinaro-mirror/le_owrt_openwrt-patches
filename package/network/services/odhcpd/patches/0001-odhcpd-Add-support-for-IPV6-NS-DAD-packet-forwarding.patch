@@ -1,17 +1,20 @@
-From cadda922d5506019c8fc041e3d79fdaf39648b2b Mon Sep 17 00:00:00 2001
+From 1baa401d59ac851a6c23807e2ebbc0884c069512 Mon Sep 17 00:00:00 2001
 From: HuaWen CHEN <quic_huawenc@quicinc.com>
 Date: Fri, 15 Mar 2024 12:53:27 +0800
 Subject: [PATCH] odhcpd: Add support for IPV6 NS DAD packet forwarding logic
 
 Support to forward IPv6 NS-DAD packets received on the bridge
 towards Modem to address a potential IPv6 address conflict.
+Solve race condition in ndp_setup_interface to avoid infinite
+loop of uloop recvmsg for EBADF.
 
 Signed-off-by: aryamali <quic_aryamali@quicinc.com>
 ---
  src/config.c |   8 +-
- src/ndp.c    | 366 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/ndp.c    | 369 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/odhcpd.c |   9 +-
  src/odhcpd.h |  15 +++
- 3 files changed, 386 insertions(+), 3 deletions(-)
+ 4 files changed, 396 insertions(+), 5 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
 index 62d4857..098fa4a 100644
@@ -61,7 +64,7 @@ index 62d4857..098fa4a 100644
  		INIT_LIST_HEAD(&iface->ia_assignments);
  		INIT_LIST_HEAD(&iface->dhcpv4_assignments);
 diff --git a/src/ndp.c b/src/ndp.c
-index 0ec6fed..0487dc1 100644
+index 0ec6fed..528055f 100644
 --- a/src/ndp.c
 +++ b/src/ndp.c
 @@ -29,6 +29,11 @@
@@ -110,7 +113,7 @@ index 0ec6fed..0487dc1 100644
  static struct netevent_handler ndp_netevent_handler = { .cb = ndp_netevent_cb, };
  
  /* Initialize NDP-proxy */
-@@ -65,16 +89,265 @@ int ndp_init(void)
+@@ -65,16 +89,267 @@ int ndp_init(void)
  	return ret;
  }
  
@@ -367,9 +370,11 @@ index 0ec6fed..0487dc1 100644
  	int ret = 0, procfd;
  	bool dump_neigh = false;
  	char procbuf[64];
++	bool dad_forward_enable = config.dad_forward && iface->master;
  
 -	enable = enable && (iface->ndp == MODE_RELAY);
-+	enable = (enable && (iface->ndp == MODE_RELAY)) || (config.dad_forward && iface->master);
++	syslog(LOG_DEBUG, "ndp_setup_interface(%s): Entry, incoming enable=%d", iface->ifname, enable);
++	enable = enable && ((iface->ndp == MODE_RELAY) || dad_forward_enable);
  
  	snprintf(procbuf, sizeof(procbuf), "/proc/sys/net/ipv6/conf/%s/proxy_ndp", iface->ifname);
  	procfd = open(procbuf, O_WRONLY);
@@ -377,7 +382,7 @@ index 0ec6fed..0487dc1 100644
  
  	if (procfd < 0) {
  		ret = -1;
-@@ -86,6 +359,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+@@ -86,7 +361,13 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  		iface->ndp_ping_fd = -1;
  	}
  
@@ -387,9 +392,11 @@ index 0ec6fed..0487dc1 100644
 +	}
 +
  	if (iface->ndp_event.uloop.fd >= 0) {
++		iface->ndp_event.uloop.cb = NULL;
  		uloop_fd_delete(&iface->ndp_event.uloop);
  		close(iface->ndp_event.uloop.fd);
-@@ -170,6 +448,18 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+ 		iface->ndp_event.uloop.fd = -1;
+@@ -170,6 +451,18 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  		}
  #endif
  
@@ -408,7 +415,7 @@ index 0ec6fed..0487dc1 100644
  		if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
  				&bpf_prog, sizeof(bpf_prog))) {
  			syslog(LOG_ERR, "setsockopt(SO_ATTACH_FILTER): %m");
-@@ -188,6 +478,7 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+@@ -188,6 +481,7 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  			goto out;
  		}
  
@@ -416,7 +423,7 @@ index 0ec6fed..0487dc1 100644
  		memset(&mreq, 0, sizeof(mreq));
  		mreq.mr_ifindex = iface->ifindex;
  		mreq.mr_type = PACKET_MR_ALLMULTI;
-@@ -195,10 +486,15 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+@@ -195,10 +489,15 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  
  		if (setsockopt(iface->ndp_event.uloop.fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
  				&mreq, sizeof(mreq)) < 0) {
@@ -433,7 +440,7 @@ index 0ec6fed..0487dc1 100644
  
  		iface->ndp_event.handle_dgram = handle_solicit;
  		odhcpd_register(&iface->ndp_event);
-@@ -224,6 +520,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
+@@ -224,6 +523,11 @@ int ndp_setup_interface(struct interface *iface, bool enable)
  			close(iface->ndp_ping_fd);
  			iface->ndp_ping_fd = -1;
  		}
@@ -445,7 +452,7 @@ index 0ec6fed..0487dc1 100644
  	}
  
  	if (procfd >= 0)
-@@ -339,6 +640,11 @@ static void handle_solicit(void *addr, void *data, size_t len,
+@@ -339,6 +643,11 @@ static void handle_solicit(void *addr, void *data, size_t len,
  	/* Don't process solicit messages on non relay interfaces
  	 * Don't forward any non-DAD solicitation for external ifaces
  	 * TODO: check if we should even forward DADs for them */
@@ -457,7 +464,7 @@ index 0ec6fed..0487dc1 100644
  	if (iface->ndp != MODE_RELAY || (iface->external && !ns_is_dad))
  		return;
  
-@@ -350,17 +656,73 @@ static void handle_solicit(void *addr, void *data, size_t len,
+@@ -350,17 +659,73 @@ static void handle_solicit(void *addr, void *data, size_t len,
  			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
  		return; /* Invalid target */
  
@@ -531,6 +538,28 @@ index 0ec6fed..0487dc1 100644
  	}
  
  	/* Catch global-addressed NS and answer them manually.
+diff --git a/src/odhcpd.c b/src/odhcpd.c
+index 0849b43..731d418 100644
+--- a/src/odhcpd.c
++++ b/src/odhcpd.c
+@@ -354,10 +354,15 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _unused unsigned int even
+ 
+ 		ssize_t len = recvmsg(u->fd, &msg, MSG_DONTWAIT);
+ 		if (len < 0) {
+-			if (errno == EAGAIN)
++			if (errno == EAGAIN) {
+ 				break;
+-			else
++			} else if (errno == EBADF) {
++				syslog(LOG_ERR, "recvmsg failed with EBADF on fd %d, deregistering event", u->fd);
++				odhcpd_deregister(e);
++				break;
++			} else {
+ 				continue;
++			}
+ 		}
+ 
+ 
 diff --git a/src/odhcpd.h b/src/odhcpd.h
 index 7a82e98..2af209e 100644
 --- a/src/odhcpd.h
@@ -569,5 +598,5 @@ index 7a82e98..2af209e 100644
 +#define ALL_ROUTERS_MGROUP "FF02::2"
 +#define ALL_ROUTERS_MLD2 "FF02::16"
 -- 
-2.40.0.windows.1
+2.37.3.windows.1
 
