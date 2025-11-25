@@ -1,8 +1,8 @@
 include $(INCLUDE_DIR)/target.mk
 
-ifeq ($(BOARD), sdx85)
-  ifeq ($(CONFIG_TARGET_PROFILE), "cpe")
-    ifeq ($(TARGET_VARIANT), debug)
+ifeq ($(CONFIG_TARGET_PROFILE), "cpe")
+  ifeq ($(TARGET_VARIANT), debug)
+    ifneq ($(filter $(BOARD), sdx85 sdxecho),)
       STRIP:=:
       RSTRIP:=:
     endif
