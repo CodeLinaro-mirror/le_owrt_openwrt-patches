@@ -1,0 +1,35 @@
+This patch file is from Qualcomm Technologies, Inc. and is provided under the following license:
+
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+
+From c2b3d5d1fffe3235eaa617751802b4769b7bf57f Mon Sep 17 00:00:00 2001
+From: Vinod Kumar Reddy <vreddyk@qti.qualcomm.com>
+Date: Tue, 20 Jan 2026 12:14:11 +0530
+Subject: [PATCH] openwrt-patches : Add firmware_load permission to  load
+ firmware
+
+With New Kernel version 6.17 onwards has firmware_load so adding for
+Backward compatability
+
+Signed-off-by: Vinod Kumar Reddy <vreddyk@qti.qualcomm.com>
+---
+ src/av.cil | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/av.cil b/src/av.cil
+index 15eab88..95ac5d6 100644
+--- a/src/av.cil
++++ b/src/av.cil
+@@ -193,7 +193,7 @@
+  ())
+ (class
+  system
+- (ipc_info module_load module_request syslog_console syslog_mod syslog_read))
++ (ipc_info module_load module_request syslog_console syslog_mod syslog_read firmware_load))
+ (class
+  tcp_socket
+  (name_connect node_bind))
+-- 
+2.34.1
+
