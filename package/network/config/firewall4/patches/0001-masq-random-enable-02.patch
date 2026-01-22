@@ -9,38 +9,43 @@ Date: Sun, 6 Oct 2024 15:21:10 +0530
 Subject: [PATCH] masq-random-enable-02
 
 
-This patch will add masq_random option in config zone to add masquerade
-random in symmetric nat.
+This patch will add masq_random_full option in config zone to add masquerade
+fully-random in symmetric nat.
 
 Signed-off-by: Ayush Kumar<quic_ayukuma@quicinc.com>
 ---
- root/usr/share/firewall4/templates/zone-masq.uc | 6 +++++-
- root/usr/share/ucode/fw4.uc                     | 1 +
- 2 files changed, 6 insertions(+), 1 deletion(-)
+ root/usr/share/firewall4/templates/zone-masq.uc | 10 +++++++++-
+ root/usr/share/ucode/fw4.uc                     |  2 ++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
 
 diff --git a/root/usr/share/firewall4/templates/zone-masq.uc b/root/usr/share/firewall4/templates/zone-masq.uc
-index c3e66d8..379817c 100644
+index c3e66d8..1b5483b 100644
 --- a/root/usr/share/firewall4/templates/zone-masq.uc
 +++ b/root/usr/share/firewall4/templates/zone-masq.uc
-@@ -10,4 +10,8 @@ meta nfproto {{ fw4.nfproto(family) }} {%+ if (saddrs && saddrs[0]): -%}
+@@ -10,4 +10,12 @@ meta nfproto {{ fw4.nfproto(family) }} {%+ if (saddrs && saddrs[0]): -%}
  	{{ fw4.ipproto(family) }} daddr != {{ fw4.set(map(daddrs[1], fw4.cidr)) }} {%+ endif -%}
  {%+ for (let a in (daddrs ? daddrs[2] : [])): -%}
  	{{ fw4.ipproto(family) }} daddr & {{ a.mask }} {{ a.invert ? '!=' : '==' }} {{ a.addr }} {%+ endfor -%}
 -masquerade comment "!fw4: Masquerade {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
-+{%+ if (zone.masq_random): -%}
++{%+ if (zone.masq_random && !zone.masq_random_full): -%}
 +    masquerade random {%+ endif -%}
-+{%+ if (!zone.masq_random): -%}
++{%+ if (!zone.masq_random && zone.masq_random_full): -%}
++    masquerade fully-random {%+ endif -%}
++{%+ if (zone.masq_random && zone.masq_random_full): -%}
++    masquerade fully-random {%+ endif -%}
++{%+ if (!zone.masq_random && !zone.masq_random_full): -%}
 +	masquerade {%+ endif -%}
 +comment "!fw4: Masquerade {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
 diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
-index a59eb41..8c4ac6f 100644
+index 2d77146..e338532 100644
 --- a/root/usr/share/ucode/fw4.uc
 +++ b/root/usr/share/ucode/fw4.uc
-@@ -1976,6 +1976,7 @@ return {
+@@ -1999,6 +1999,8 @@ return {
  			forward: [ "policy", this.state.defaults ? this.state.defaults.forward : "drop" ],
  
  			masq: [ "bool" ],
 +			masq_random: [ "bool" ],
++			masq_random_full: [ "bool" ],
  			masq_allow_invalid: [ "bool" ],
  			masq_src: [ "network", null, PARSE_LIST ],
  			masq_dest: [ "network", null, PARSE_LIST ],
