@@ -1,0 +1,30 @@
+From 40628d20adb1054d1ccf24661690d89bbac5376a Mon Sep 17 00:00:00 2001
+From: Aslam Basha Mahammad <amahamma@qti.qualcomm.com>
+Date: Wed, 31 Dec 2025 17:53:40 +0530
+Subject: [PATCH] netifd increase retries for sta bridge mode system addif
+
+Signed-off-by: Aslam Basha Mahammad <amahamma@qti.qualcomm.com>
+---
+ system-linux.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/system-linux.c b/system-linux.c
+index 21eddda..66aee26 100644
+--- a/system-linux.c
++++ b/system-linux.c
+@@ -993,8 +993,11 @@ retry:
+ 		tries++;
+ 		D(SYSTEM, "Failed to add device '%s'/(ifindex=%d) to bridge '%s' (tries=%d): %s\n",
+ 		  dev->ifname, dev->ifindex, bridge->ifname, tries, strerror(errno));
+-		if (tries <= 3)
++		if (tries <= 10)
++		{
++			usleep(100000); //sleep 100m sec before retry
+ 			goto retry;
++		}
+ 	}
+ 
+ 	if (dev->wireless)
+-- 
+2.34.1
+

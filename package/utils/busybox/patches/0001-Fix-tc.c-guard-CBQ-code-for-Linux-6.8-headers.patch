@@ -1,0 +1,60 @@
+Remove CBQ functionality from tc
+
+6.8+ kernel has dropped CBQ support [1], Now that OE uses 6.9 for
+kernel-headers means we are hitting the undefined symbol
+TCA_CBQ_MAX [2]
+
+[1] https://github.com/torvalds/linux/commit/33241dca486264193ed68167c8eeae1fb197f3df
+[2] https://bugs.busybox.net/show_bug.cgi?id=15934
+
+Upstream-Status: Submitted [https://bugs.busybox.net/show_bug.cgi?id=15931]
+Signed-off-by: Khem Raj <raj.khem@gmail.com>
+
+---
+ networking/tc.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/networking/tc.c b/networking/tc.c
+index 43187f7ee..58097a075 100644
+--- a/networking/tc.c
++++ b/networking/tc.c
+@@ -230,7 +230,7 @@ static int cbq_parse_opt(int argc, char **argv, struct nlmsghdr *n)
+ {
+ 	return 0;
+ }
+-#endif
++
+ static int cbq_print_opt(struct rtattr *opt)
+ {
+ 	struct rtattr *tb[TCA_CBQ_MAX+1];
+@@ -322,6 +322,7 @@ static int cbq_print_opt(struct rtattr *opt)
+  done:
+ 	return 0;
+ }
++#endif
+ 
+ static FAST_FUNC int print_qdisc(
+ 		const struct sockaddr_nl *who UNUSED_PARAM,
+@@ -373,7 +374,8 @@ static FAST_FUNC int print_qdisc(
+ 		if (qqq == 0) { /* pfifo_fast aka prio */
+ 			prio_print_opt(tb[TCA_OPTIONS]);
+ 		} else if (qqq == 1) { /* class based queuing */
+-			cbq_print_opt(tb[TCA_OPTIONS]);
++			//cbq_print_opt(tb[TCA_OPTIONS]);
++			 printf("cbq not supported");
+ 		} else {
+ 			/* don't know how to print options for this qdisc */
+ 			printf("(options for %s)", name);
+@@ -444,7 +446,8 @@ static FAST_FUNC int print_class(
+ 			/* nothing. */ /*prio_print_opt(tb[TCA_OPTIONS]);*/
+ 		} else if (qqq == 1) { /* class based queuing */
+ 			/* cbq_print_copt() is identical to cbq_print_opt(). */
+-			cbq_print_opt(tb[TCA_OPTIONS]);
++			//cbq_print_opt(tb[TCA_OPTIONS]);
++			printf("cbq not supported");
+ 		} else {
+ 			/* don't know how to print options for this class */
+ 			printf("(options for %s)", name);
+-- 
+2.34.1
+

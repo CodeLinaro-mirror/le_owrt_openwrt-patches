@@ -1,0 +1,44 @@
+From da2400ae7213272c347d3aceec5915e7a24f738d Mon Sep 17 00:00:00 2001
+From: "Kuruva, Jaya Krishna" <jkuruva@qti.qualcomm.com>
+Date: Wed, 14 Jan 2026 09:18:17 +0530
+Subject: [PATCH] Odhcpd: open /proc/net/ipv6_route to check if default route
+ is present
+
+Signed-off-by: "Kuruva, Jaya Krishna" <jkuruva@qti.qualcomm.com>
+---
+ src/router.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/router.c b/src/router.c
+index 102cbe0..52ab56e 100644
+--- a/src/router.c
++++ b/src/router.c
+@@ -380,9 +380,15 @@ static bool parse_routes(struct odhcpd_ipaddr *n, ssize_t len)
+ 	bool found_default = false;
+ 	char line[512], ifname[16];
+ 
+-	rewind(fp_route);
++	//rewind(fp_route);
+ 
+-	while (fgets(line, sizeof(line), fp_route)) {
++	FILE *fp = fopen("/proc/net/ipv6_route", "r");
++	if (!fp) {
++		syslog(LOG_ERR, "Failed to open /proc/net/ipv6_route: %m");
++		return false;
++	}
++
++	while (fgets(line, sizeof(line), fp)) {
+ 		uint32_t rflags;
+ 		if (sscanf(line, "00000000000000000000000000000000 00 "
+ 				"%*s %*s %*s %*s %*s %*s %*s %15s", ifname) &&
+@@ -406,6 +412,7 @@ static bool parse_routes(struct odhcpd_ipaddr *n, ssize_t len)
+ 		}
+ 	}
+ 
++	fclose(fp);
+ 	return found_default;
+ }
+ 
+-- 
+2.34.1
+
