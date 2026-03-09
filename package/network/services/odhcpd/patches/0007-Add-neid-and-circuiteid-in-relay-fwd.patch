@@ -1,0 +1,283 @@
+From 396997825b903e1b037f5a55db4e09178435d30c Mon Sep 17 00:00:00 2001
+From: Dheeraj Kumar <dhekum@qti.qualcomm.com>
+Date: Wed, 4 Mar 2026 00:58:28 +0530
+Subject: [PATCH] Add-neid-and-circuiteid-in-relay-fwd
+
+---
+ src/config.c |  30 ++++++++++++
+ src/dhcpv6.c | 136 ++++++++++++++++++++++++++++++++++++++-------------
+ src/dhcpv6.h |   2 +
+ src/odhcpd.h |   3 ++
+ 4 files changed, 138 insertions(+), 33 deletions(-)
+
+diff --git a/src/config.c b/src/config.c
+index 0818ee7..09106e3 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -95,6 +95,8 @@ enum {
+ 	IFACE_ATTR_NTP,
+ 	IFACE_ATTR_STA_BRIDGE_MODE,
+ 	IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE,
++	IFACE_ATTR_CIRCUITID,
++	IFACE_ATTR_NEID,
+ 	IFACE_ATTR_MAX
+ };
+ 
+@@ -150,6 +152,8 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
+ 	[IFACE_ATTR_NTP] = { .name = "ntp", .type = BLOBMSG_TYPE_ARRAY },
+ 	[IFACE_ATTR_STA_BRIDGE_MODE] = { .name = "sta_bridge_mode", .type = BLOBMSG_TYPE_BOOL },
+ 	[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE] = { .name = "qcmap_prefix_delegation_mode", .type = BLOBMSG_TYPE_INT32 },
++	[IFACE_ATTR_CIRCUITID] = { .name = "circuitid", .type = BLOBMSG_TYPE_STRING },
++	[IFACE_ATTR_NEID] = { .name = "neid", .type = BLOBMSG_TYPE_STRING },
+ };
+ 
+ static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
+@@ -250,6 +254,10 @@ static void clean_interface(struct interface *iface)
+ 	free(iface->dhcpv4_ntp);
+ 	free(iface->dhcpv6_ntp);
+ 	free(iface->dhcpv6_sntp);
++	free(iface->circuitid);
++	iface->circuitid = NULL;
++	free(iface->neid);
++	iface->neid = NULL;
+ 	memset(&iface->ra, 0, sizeof(*iface) - offsetof(struct interface, ra));
+ 	set_interface_defaults(iface);
+ }
+@@ -1109,6 +1117,28 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+ 	if ((c = tb[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE]))
+ 		iface->qcmap_prefix_delegation_mode = blobmsg_get_u32(c);
+ 
++	if ((c = tb[IFACE_ATTR_CIRCUITID])) {
++		char *new_circuitid = strdup(blobmsg_get_string(c));
++		if (!new_circuitid) {
++			/* Log error to syslog and indicate failure */
++			syslog(LOG_ERR, "Failed to allocate memory for circuitid");
++			return -1;
++		}
++		free(iface->circuitid);
++		iface->circuitid = new_circuitid;
++	}
++
++	if ((c = tb[IFACE_ATTR_NEID])) {
++		char *new_neid = strdup(blobmsg_get_string(c));
++		if (!new_neid) {
++			/* Log error to syslog and indicate failure */
++			syslog(LOG_ERR, "Failed to allocate memory for neid");
++			return -1;
++		}
++		free(iface->neid);
++		iface->neid = new_neid;
++	}
++
+ 	return 0;
+ 
+ err:
+diff --git a/src/dhcpv6.c b/src/dhcpv6.c
+index 6e127cd..74398c2 100644
+--- a/src/dhcpv6.c
++++ b/src/dhcpv6.c
+@@ -28,6 +28,8 @@
+ #ifdef DHCPV4_SUPPORT
+ #include "dhcpv4.h"
+ #endif
++#define RELAY_BUF_SIZE 9000  // Support jumbo frames
++#define MAX_OPTION_STRING_LEN 255
+ 
+ static void relay_client_request(struct sockaddr_in6 *source,
+ 		const void *data, size_t len, struct interface *iface);
+@@ -791,19 +793,11 @@ static void relay_client_request(struct sockaddr_in6 *source,
+ 		const void *data, size_t len, struct interface *iface)
+ {
+ 	const struct dhcpv6_relay_header *h = data;
+-	/* Construct our forwarding envelope */
+-	struct dhcpv6_relay_forward_envelope hdr = {
+-		.msg_type = DHCPV6_MSG_RELAY_FORW,
+-		.hop_count = 0,
+-		.interface_id_type = htons(DHCPV6_OPT_INTERFACE_ID),
+-		.interface_id_len = htons(sizeof(uint32_t)),
+-		.relay_message_type = htons(DHCPV6_OPT_RELAY_MSG),
+-		.relay_message_len = htons(len),
+-	};
+-	struct iovec iov[2] = {{&hdr, sizeof(hdr)}, {(void *)data, len}};
+-	struct interface *c;
+-	struct odhcpd_ipaddr *ip;
+-	struct sockaddr_in6 s;
++	unsigned char relay_buf[RELAY_BUF_SIZE ];
++	size_t relay_len;
++	struct dhcpv6_relay_header *hdr = (struct dhcpv6_relay_header *)relay_buf;
++	unsigned char *opt_ptr;
++	unsigned char * const relay_buf_end = relay_buf + sizeof(relay_buf);
+ 
+ 	if (h->msg_type == DHCPV6_MSG_RELAY_REPL ||
+ 	    h->msg_type == DHCPV6_MSG_RECONFIGURE ||
+@@ -813,22 +807,107 @@ static void relay_client_request(struct sockaddr_in6 *source,
+ 
+ 	syslog(LOG_DEBUG, "Got a DHCPv6-request on %s", iface->name);
+ 
++	/* 1. Add relay header fields */
++	hdr->msg_type = DHCPV6_MSG_RELAY_FORW;
++	hdr->hop_count = 0;
+ 	if (h->msg_type == DHCPV6_MSG_RELAY_FORW) { /* handle relay-forward */
+ 		if (h->hop_count >= DHCPV6_HOP_COUNT_LIMIT)
+ 			return; /* Invalid hop count */
+-
+-		hdr.hop_count = h->hop_count + 1;
++		hdr->hop_count = h->hop_count + 1;
+ 	}
+ 
+-	/* use memcpy here as the destination fields are unaligned */
+-	memcpy(&hdr.peer_address, &source->sin6_addr, sizeof(struct in6_addr));
+-	memcpy(&hdr.interface_id_data, &iface->ifindex, sizeof(iface->ifindex));
++	memcpy(&hdr->peer_address, &source->sin6_addr, sizeof(struct in6_addr));
+ 
+ 	/* Detect public IP of slave interface to use as link-address */
+-	ip = relay_link_address(iface);
++	struct odhcpd_ipaddr *ip = relay_link_address(iface);
+ 	if (ip)
+-		memcpy(&hdr.link_address, &ip->addr.in6, sizeof(hdr.link_address));
++		memcpy(&hdr->link_address, &ip->addr.in6, sizeof(hdr->link_address));
++	else
++		memset(&hdr->link_address, 0, sizeof(hdr->link_address));
++
++	opt_ptr = hdr->options;
++
++	/* 2. Construct Interface-ID option (18) */
++	unsigned char if_id_buf[512];
++	size_t if_id_len = 0;
++	uint32_t ifindex_n = htonl(iface->ifindex);
++
++	if (opt_ptr + 4 + 4 > relay_buf_end) { /* 4 bytes for option header + 4 bytes for ifindex */
++		syslog(LOG_ERR, "Buffer overflow: not enough space for Interface-ID");
++		return;
++	}
++
++	memcpy(&if_id_buf[if_id_len], &ifindex_n, 4);
++	if_id_len += 4;
++
++	uint16_t opt18_type = htons(DHCPV6_OPT_INTERFACE_ID);
++	uint16_t opt18_len = htons(if_id_len);
++	memcpy(opt_ptr, &opt18_type, 2);
++	opt_ptr += 2;
++	memcpy(opt_ptr, &opt18_len, 2);
++	opt_ptr += 2;
++	memcpy(opt_ptr, if_id_buf, if_id_len);
++	opt_ptr += if_id_len;
++
++	if (iface->circuitid) {
++		size_t l = strlen(iface->circuitid);
++		if (l > MAX_OPTION_STRING_LEN) {
++			syslog(LOG_WARNING, "Circuit-ID too long (%zu bytes), truncating to %d", l, MAX_OPTION_STRING_LEN);
++			l = MAX_OPTION_STRING_LEN;
++    	}
++		if (opt_ptr + 4 + l > relay_buf_end) {
++			syslog(LOG_ERR, "Buffer overflow: not enough space for Circuit-ID");
++			return;
++		}
++
++		uint16_t type = htons(DHCPV6_OPT_REMOTE_ID);
++		uint16_t length = htons(l);
++		memcpy(opt_ptr, &type, 2);
++		opt_ptr += 2;
++		memcpy(opt_ptr, &length, 2);
++		opt_ptr += 2;
++		memcpy(opt_ptr, iface->circuitid, l);
++		opt_ptr += l;
++	}
+ 
++	if (iface->neid) {
++		size_t l = strlen(iface->neid);
++		if (opt_ptr + 4 + l > relay_buf_end) {
++			syslog(LOG_ERR, "Buffer overflow: not enough space for NEID");
++			return;
++		}
++
++		uint16_t type = htons(DHCPV6_OPT_SUBSCRIBER_ID);
++		uint16_t length = htons(l);
++		memcpy(opt_ptr, &type, 2);
++		opt_ptr += 2;
++		memcpy(opt_ptr, &length, 2);
++		opt_ptr += 2;
++		memcpy(opt_ptr, iface->neid, l);
++		opt_ptr += l;
++	}
++
++	/* 3. Add Relay-Msg option (9) */
++	if (opt_ptr + 4 + len > relay_buf_end) {
++		syslog(LOG_ERR, "Buffer overflow: not enough space for relayed message");
++		return;
++	}
++
++	uint16_t opt9_type = htons(DHCPV6_OPT_RELAY_MSG);
++	uint16_t opt9_len = htons(len);
++	memcpy(opt_ptr, &opt9_type, 2);
++	opt_ptr += 2;
++	memcpy(opt_ptr, &opt9_len, 2);
++	opt_ptr += 2;
++	memcpy(opt_ptr, data, len);
++	opt_ptr += len;
++
++	/* 4. Send the message */
++	relay_len = opt_ptr - relay_buf;
++
++	struct iovec iov = {relay_buf, relay_len};
++	struct interface *c;
++	struct sockaddr_in6 s;
+ 	memset(&s, 0, sizeof(s));
+ 	s.sin6_family = AF_INET6;
+ 	s.sin6_port = htons(DHCPV6_SERVER_PORT);
+@@ -839,21 +918,12 @@ static void relay_client_request(struct sockaddr_in6 *source,
+ 			continue;
+ 
+ 		if (!ip) {
+-			/* No suitable address! Is the slave not configured yet?
+-			 * Detect public IP of master interface and use it instead
+-			 * This is WRONG and probably violates the RFC. However
+-			 * otherwise we have a hen and egg problem because the
+-			 * slave-interface cannot be auto-configured. */
+-			ip = relay_link_address(c);
+-			if (!ip)
+-				continue; /* Could not obtain a suitable address */
+-
+-			memcpy(&hdr.link_address, &ip->addr.in6, sizeof(hdr.link_address));
+-			ip = NULL;
++			struct odhcpd_ipaddr *master_ip = relay_link_address(c);
++			if (master_ip)
++				memcpy(&hdr->link_address, &master_ip->addr.in6, sizeof(hdr->link_address));
+ 		}
+ 
+ 		syslog(LOG_DEBUG, "Sending a DHCPv6-relay-forward on %s", c->name);
+-
+-		odhcpd_send(c->dhcpv6_event.uloop.fd, &s, iov, 2, c);
++		odhcpd_send(c->dhcpv6_event.uloop.fd, &s, &iov, 1, c);
+ 	}
+ }
+diff --git a/src/dhcpv6.h b/src/dhcpv6.h
+index b925928..81cdddd 100644
+--- a/src/dhcpv6.h
++++ b/src/dhcpv6.h
+@@ -57,6 +57,8 @@
+ #define DHCPV6_OPT_IA_PREFIX 26
+ #define DHCPV6_OPT_SNTP_SERVERS 31
+ #define DHCPV6_OPT_INFO_REFRESH 32
++#define DHCPV6_OPT_REMOTE_ID 37
++#define DHCPV6_OPT_SUBSCRIBER_ID 38
+ #define DHCPV6_OPT_FQDN 39
+ #define DHCPV6_OPT_NTP_SERVERS 56
+ #define DHCPV6_OPT_SOL_MAX_RT 82
+diff --git a/src/odhcpd.h b/src/odhcpd.h
+index 6eb1526..6871339 100644
+--- a/src/odhcpd.h
++++ b/src/odhcpd.h
+@@ -395,6 +395,9 @@ struct interface {
+ 	struct in6_addr *dhcpv6_sntp;
+ 	size_t dhcpv6_sntp_cnt;
+ 
++	char *circuitid;
++	char *neid;
++
+ 	bool sta_bridge_mode;
+ 
+ 	// Legacy Prefix Delegation,
+-- 
+2.34.1
+
