@@ -1,0 +1,225 @@
+From 10472c373de949a7862c45be7528680c0e71dfee Mon Sep 17 00:00:00 2001
+From: HuaWen CHEN <huawenc@qti.qualcomm.com>
+Date: Fri, 20 Mar 2026 09:01:00 +0800
+Subject: [PATCH] netifd: maintain dns host route for multiple backhaul case
+
+Change-Id: I8cbdea3234668aa6305900fcc2605e7e5ea6d93a
+Signed-off-by: HuaWen CHEN <huawenc@qti.qualcomm.com>
+---
+ interface-ip.c | 172 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 169 insertions(+), 3 deletions(-)
+
+diff --git a/interface-ip.c b/interface-ip.c
+index 79b99c0..46228c7 100644
+--- a/interface-ip.c
++++ b/interface-ip.c
+@@ -1438,8 +1438,10 @@ interface_add_dns_server(struct interface_ip_settings *ip, const char *str)
+ 	return;
+ 
+ add:
+-	D(INTERFACE, "Add IPv%c DNS server: %s",
+-	  s->af == AF_INET6 ? '6' : '4', str);
++	D(INTERFACE, "Add IPv%c DNS server: %s (iface=%s, no_defaultroute=%d)",
++	  s->af == AF_INET6 ? '6' : '4', str,
++	  ip->iface ? ip->iface->name : "?",
++	  ip->iface ? ip->iface->proto_ip.no_defaultroute : -1);
+ 	vlist_simple_add(&ip->dns_servers, &s->node);
+ }
+ 
+@@ -1533,6 +1535,57 @@ static int resolv_conf_iface_cmp(const void *k1, const void *k2, void *ptr)
+ 	return strcmp(iface1->name, iface2->name);
+ }
+ 
++/**
++ * route_matches_dns_server - check if a host route's destination matches
++ * any DNS server registered by the given interface in proto_ip.dns_servers.
++ */
++static bool
++route_matches_dns_server(struct interface *iface, struct device_route *route)
++{
++	struct dns_server *s;
++	int addrsize;
++
++	vlist_simple_for_each_element(&iface->proto_ip.dns_servers, s, node) {
++		addrsize = (s->af == AF_INET6) ?
++			sizeof(struct in6_addr) : sizeof(struct in_addr);
++		if (memcmp(&route->addr, &s->addr, addrsize) == 0)
++			return true;
++	}
++	return false;
++}
++
++/**
++ * dns_server_on_winner - check if a route's DNS server IP also appears
++ * on any winner interface (no_defaultroute=false, state=IFS_UP).
++ *
++ * Returns true if the same DNS server IP exists in the dns_servers list
++ * of at least one winner interface. Used to determine whether a non-winner
++ * interface's DNS host route actually conflicts and needs to be suppressed.
++ * DNS servers unique to a non-winner interface are left untouched.
++ */
++static bool
++dns_server_on_winner(struct device_route *route, bool v6)
++{
++	struct interface *iface;
++	struct dns_server *s;
++	int addrsize = v6 ? sizeof(struct in6_addr) : sizeof(struct in_addr);
++
++	vlist_for_each_element(&interfaces, iface, node) {
++		if (iface->state != IFS_UP)
++			continue;
++		if (iface->proto_ip.no_defaultroute)
++			continue;
++
++		vlist_simple_for_each_element(&iface->proto_ip.dns_servers, s, node) {
++			if (s->af != (v6 ? AF_INET6 : AF_INET))
++				continue;
++			if (memcmp(&route->addr, &s->addr, addrsize) == 0)
++				return true;
++		}
++	}
++	return false;
++}
++
+ static void
+ __interface_write_dns_entries(FILE *f, const char *jail)
+ {
+@@ -1544,6 +1597,7 @@ __interface_write_dns_entries(FILE *f, const char *jail)
+ 
+ 	avl_init(&resolv_conf_iface_entries, resolv_conf_iface_cmp, false, NULL);
+ 
++	/* Phase 1: Build winner list (interfaces with no_defaultroute=false) */
+ 	vlist_for_each_element(&interfaces, iface, node) {
+ 		if (iface->state != IFS_UP)
+ 			continue;
+@@ -1559,7 +1613,10 @@ __interface_write_dns_entries(FILE *f, const char *jail)
+ 
+ 		if (iface->proto_ip.no_defaultroute == true)
+ 		{
+-			D(INTERFACE, "Skip add dns server for interface since default route not present %s\n", iface->name);
++			D(INTERFACE, "Skip dns host routes for iface=%s: no_defaultroute=true (option defaultroute=0 in UCI config). "
++			  "DNS servers on this iface will NOT get /32 host routes. "
++			  "To fix: set 'option defaultroute 1' on this interface, or ensure DNS servers are also on a winner iface.\n",
++			  iface->name);
+ 			continue;
+ 		}
+ 
+@@ -1571,6 +1628,115 @@ __interface_write_dns_entries(FILE *f, const char *jail)
+ 		avl_insert(&resolv_conf_iface_entries, &entry->node);
+ 	}
+ 
++	/*
++	 * Phase 1.5: Add DNS host routes for winner interfaces.
++	 *
++	 * For each winner interface (no_defaultroute=false), add a /32 (IPv4)
++	 * or /128 (IPv6) host route for each DNS server via that interface.
++	 * This ensures DNS traffic is routed correctly even when the DNS server
++	 * IP is not directly on the interface's subnet.
++	 *
++	 * interface_ip_add_target_route() finds the best existing route to the
++	 * DNS server address and installs a specific host route via that path.
++	 * Routes are added to iface->host_routes and cleaned up automatically
++	 * when the interface goes down.
++	 */
++	avl_for_each_element(&resolv_conf_iface_entries, entry, node) {
++		struct interface *winner = (struct interface *)entry->node.key;
++		struct dns_server *s;
++		char buf[INET6_ADDRSTRLEN];
++		bool v6;
++
++		vlist_simple_for_each_element(&winner->proto_ip.dns_servers, s, node) {
++			v6 = (s->af == AF_INET6);
++			if (interface_ip_add_target_route(&s->addr, v6, winner, false))
++				D(INTERFACE, "Added DNS host route for %s via winner iface=%s",
++				  inet_ntop(s->af, &s->addr, buf, sizeof(buf)),
++				  winner->name);
++			else
++				D(INTERFACE, "No route found for DNS server %s on winner iface=%s",
++				  inet_ntop(s->af, &s->addr, buf, sizeof(buf)),
++				  winner->name);
++		}
++
++		vlist_simple_for_each_element(&winner->config_ip.dns_servers, s, node) {
++			v6 = (s->af == AF_INET6);
++			if (interface_ip_add_target_route(&s->addr, v6, winner, false))
++				D(INTERFACE, "Added DNS host route for %s (config) via winner iface=%s",
++				  inet_ntop(s->af, &s->addr, buf, sizeof(buf)),
++				  winner->name);
++		}
++	}
++
++	/*
++	 * Phase 2: Reconcile DNS server host routes in the kernel.
++	 *
++	 * When the same DNS server IP appears as a host route on multiple
++	 * interfaces, only the interface with no_defaultroute=false (winner)
++	 * should have its DNS host route active in the kernel.
++	 *
++	 * Non-winner interfaces (no_defaultroute=true) have their conflicting
++	 * DNS host routes suppressed via system_del_route() but kept in the
++	 * vlist (route->enabled=false) for automatic restoration when
++	 * no_defaultroute switches to false at runtime.
++	 *
++	 * DNS servers unique to a non-winner interface are left untouched.
++	 */
++	vlist_for_each_element(&interfaces, iface, node) {
++		struct device_route *route;
++		struct device *dev;
++		bool iface_is_winner;
++
++		if (iface->state != IFS_UP || !iface->l3_dev.dev)
++			continue;
++
++		dev = iface->l3_dev.dev;
++		iface_is_winner = !!avl_find(&resolv_conf_iface_entries, iface);
++
++		vlist_for_each_element(&iface->proto_ip.route, route, node) {
++			bool v6 = ((route->flags & DEVADDR_FAMILY) == DEVADDR_INET6);
++
++			/* Only process host routes (/32 IPv4 or /128 IPv6) */
++			if (route->mask != (v6 ? 128 : 32))
++				continue;
++
++			/* Only process routes whose destination is a DNS server */
++			if (!route_matches_dns_server(iface, route))
++				continue;
++
++			if (iface_is_winner) {
++				/*
++				 * Winner (no_defaultroute=false): restore DNS host route
++				 * if it was previously suppressed (e.g., after a
++				 * no_defaultroute true->false switch via interface_change_config).
++				 */
++				if (!route->enabled) {
++					D(INTERFACE, "Restore DNS host route on interface '%s' "
++					  "(no_defaultroute=false)", iface->name);
++					if (!system_add_route(dev, route))
++						route->enabled = true;
++				}
++			} else {
++				/*
++				 * Loser (no_defaultroute=true): only suppress this DNS host
++				 * route if the same DNS server IP also appears on a winner
++				 * interface. If the DNS server is unique to this interface,
++				 * leave it active - there is no conflict.
++				 */
++				if (!dns_server_on_winner(route, v6))
++					continue;
++
++				if (route->enabled) {
++					D(INTERFACE, "Suppress DNS host route on interface '%s' "
++					  "(no_defaultroute=true, conflicts with winner)", iface->name);
++					system_del_route(dev, route);
++					route->enabled = false;
++				}
++			}
++		}
++	}
++
++	/* Phase 3: Write DNS entries to resolv.conf */
+ 	avl_for_each_element(&resolv_conf_iface_entries, entry, node) {
+ 		iface = (struct interface *)entry->node.key;
+ 		struct device *dev = iface->l3_dev.dev;
+-- 
+2.34.1
+
