@@ -1,17 +1,19 @@
-From 396997825b903e1b037f5a55db4e09178435d30c Mon Sep 17 00:00:00 2001
+From d488a7e4ed6431c2b7f2be469f641427403ca6c1 Mon Sep 17 00:00:00 2001
 From: Dheeraj Kumar <dhekum@qti.qualcomm.com>
-Date: Wed, 4 Mar 2026 00:58:28 +0530
-Subject: [PATCH] Add-neid-and-circuiteid-in-relay-fwd
+Date: Wed, 11 Mar 2026 12:11:20 +0530
+Subject: [PATCH] Add neid and circuiteid in relay fwd
+
+Signed-off-by: Dheeraj Kumar <dhekum@qti.qualcomm.com>
 
 ---
- src/config.c |  30 ++++++++++++
- src/dhcpv6.c | 136 ++++++++++++++++++++++++++++++++++++++-------------
+ src/config.c |  80 ++++++++++++++++++++++++++
+ src/dhcpv6.c | 155 +++++++++++++++++++++++++++++++++++++++------------
  src/dhcpv6.h |   2 +
- src/odhcpd.h |   3 ++
- 4 files changed, 138 insertions(+), 33 deletions(-)
+ src/odhcpd.h |   4 ++
+ 4 files changed, 206 insertions(+), 35 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
-index 0818ee7..09106e3 100644
+index 0818ee7..27a6284 100644
 --- a/src/config.c
 +++ b/src/config.c
 @@ -95,6 +95,8 @@ enum {
@@ -32,7 +34,49 @@ index 0818ee7..09106e3 100644
  };
  
  static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
-@@ -250,6 +254,10 @@ static void clean_interface(struct interface *iface)
+@@ -212,6 +216,41 @@ static const struct { const char *name; uint8_t flag; } ra_flags[] = {
+ 	{ .name = NULL, },
+ };
+ 
++// Function to read network interface downstream configuration
++static char* get_network_downstream(const char *interface_name)
++{
++	struct uci_context *uci = uci_alloc_context();
++	struct uci_package *network = NULL;
++	char *downstream = NULL;
++	
++	if (!uci)
++		return NULL;
++	
++	if (uci_load(uci, "network", &network) != UCI_OK)
++		goto cleanup;
++	
++	struct uci_element *e;
++	uci_foreach_element(&network->sections, e) {
++		struct uci_section *s = uci_to_section(e);
++		if (strcmp(s->type, "interface") != 0)
++			continue;
++			
++		if (strcmp(s->e.name, interface_name) == 0) {
++			struct uci_option *o = uci_lookup_option(uci, s, "downstream");
++			if (o && o->type == UCI_TYPE_STRING) {
++				downstream = strdup(o->v.string);
++				break;
++			}
++		}
++	}
++	
++cleanup:
++	if (network)
++		uci_unload(uci, network);
++	uci_free_context(uci);
++	return downstream;
++}
++
+ static void set_interface_defaults(struct interface *iface)
+ {
+ 	iface->ignore = true;
+@@ -250,6 +289,12 @@ static void clean_interface(struct interface *iface)
  	free(iface->dhcpv4_ntp);
  	free(iface->dhcpv6_ntp);
  	free(iface->dhcpv6_sntp);
@@ -40,10 +84,12 @@ index 0818ee7..09106e3 100644
 +	iface->circuitid = NULL;
 +	free(iface->neid);
 +	iface->neid = NULL;
++	free(iface->downstream);
++	iface->downstream = NULL;
  	memset(&iface->ra, 0, sizeof(*iface) - offsetof(struct interface, ra));
  	set_interface_defaults(iface);
  }
-@@ -1109,6 +1117,28 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+@@ -1109,6 +1154,28 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
  	if ((c = tb[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE]))
  		iface->qcmap_prefix_delegation_mode = blobmsg_get_u32(c);
  
@@ -72,8 +118,28 @@ index 0818ee7..09106e3 100644
  	return 0;
  
  err:
+@@ -1400,6 +1467,19 @@ void odhcpd_reload(void)
+ 	}
+ 
+ 
++	/* Read downstream configuration for master interfaces */
++	avl_for_each_element(&interfaces, i, avl) {
++		if (i->master) {
++			// Read downstream configuration from network interface
++			free(i->downstream);
++			i->downstream = get_network_downstream(i->name);
++			if (i->downstream) {
++				syslog(LOG_DEBUG, "Master interface %s has downstream: %s", 
++				       i->name, i->downstream);
++			}
++		}
++	}
++
+ 	avl_for_each_element_safe(&interfaces, i, avl, tmp) {
+ 		if (i->inuse) {
+ 			/* Resolve hybrid mode */
 diff --git a/src/dhcpv6.c b/src/dhcpv6.c
-index 6e127cd..74398c2 100644
+index 6e127cd..028d711 100644
 --- a/src/dhcpv6.c
 +++ b/src/dhcpv6.c
 @@ -28,6 +28,8 @@
@@ -85,7 +151,25 @@ index 6e127cd..74398c2 100644
  
  static void relay_client_request(struct sockaddr_in6 *source,
  		const void *data, size_t len, struct interface *iface);
-@@ -791,19 +793,11 @@ static void relay_client_request(struct sockaddr_in6 *source,
+@@ -786,24 +788,29 @@ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
+ 	return addr;
+ }
+ 
++/* Check if downstream interface is authorized to relay to master interface */
++static bool is_downstream_authorized(struct interface *downstream, struct interface *master)
++{
++	if (!master->master || master->dhcpv6 != MODE_RELAY)
++		return false;
++	
++	if (!master->downstream)
++		return false; // No downstream config = no relay allowed
++	
++	// Check if downstream interface name matches master's downstream config
++	return (strcmp(master->downstream, downstream->name) == 0);
++}
++
+ /* Relay client request (regular DHCPv6-relay) */
+ static void relay_client_request(struct sockaddr_in6 *source,
  		const void *data, size_t len, struct interface *iface)
  {
  	const struct dhcpv6_relay_header *h = data;
@@ -110,7 +194,7 @@ index 6e127cd..74398c2 100644
  
  	if (h->msg_type == DHCPV6_MSG_RELAY_REPL ||
  	    h->msg_type == DHCPV6_MSG_RECONFIGURE ||
-@@ -813,22 +807,107 @@ static void relay_client_request(struct sockaddr_in6 *source,
+@@ -813,47 +820,125 @@ static void relay_client_request(struct sockaddr_in6 *source,
  
  	syslog(LOG_DEBUG, "Got a DHCPv6-request on %s", iface->name);
  
@@ -173,7 +257,7 @@ index 6e127cd..74398c2 100644
 +			syslog(LOG_ERR, "Buffer overflow: not enough space for Circuit-ID");
 +			return;
 +		}
-+
+ 
 +		uint16_t type = htons(DHCPV6_OPT_REMOTE_ID);
 +		uint16_t length = htons(l);
 +		memcpy(opt_ptr, &type, 2);
@@ -183,7 +267,7 @@ index 6e127cd..74398c2 100644
 +		memcpy(opt_ptr, iface->circuitid, l);
 +		opt_ptr += l;
 +	}
- 
++
 +	if (iface->neid) {
 +		size_t l = strlen(iface->neid);
 +		if (opt_ptr + 4 + l > relay_buf_end) {
@@ -225,7 +309,12 @@ index 6e127cd..74398c2 100644
  	memset(&s, 0, sizeof(s));
  	s.sin6_family = AF_INET6;
  	s.sin6_port = htons(DHCPV6_SERVER_PORT);
-@@ -839,21 +918,12 @@ static void relay_client_request(struct sockaddr_in6 *source,
+ 	inet_pton(AF_INET6, ALL_DHCPV6_SERVERS, &s.sin6_addr);
+ 
+ 	avl_for_each_element(&interfaces, c, avl) {
+-		if (!c->master || c->dhcpv6 != MODE_RELAY)
++		//  ADD FILTERING CHECK - only relay to authorized masters
++		if (!is_downstream_authorized(iface, c))
  			continue;
  
  		if (!ip) {
@@ -245,9 +334,11 @@ index 6e127cd..74398c2 100644
 +				memcpy(&hdr->link_address, &master_ip->addr.in6, sizeof(hdr->link_address));
  		}
  
- 		syslog(LOG_DEBUG, "Sending a DHCPv6-relay-forward on %s", c->name);
+-		syslog(LOG_DEBUG, "Sending a DHCPv6-relay-forward on %s", c->name);
 -
 -		odhcpd_send(c->dhcpv6_event.uloop.fd, &s, iov, 2, c);
++		syslog(LOG_DEBUG, "Sending DHCPv6-relay-forward from %s to authorized master %s", 
++		       iface->name, c->name);
 +		odhcpd_send(c->dhcpv6_event.uloop.fd, &s, &iov, 1, c);
  	}
  }
@@ -265,15 +356,16 @@ index b925928..81cdddd 100644
  #define DHCPV6_OPT_NTP_SERVERS 56
  #define DHCPV6_OPT_SOL_MAX_RT 82
 diff --git a/src/odhcpd.h b/src/odhcpd.h
-index 6eb1526..6871339 100644
+index 6eb1526..c336c19 100644
 --- a/src/odhcpd.h
 +++ b/src/odhcpd.h
-@@ -395,6 +395,9 @@ struct interface {
+@@ -395,6 +395,10 @@ struct interface {
  	struct in6_addr *dhcpv6_sntp;
  	size_t dhcpv6_sntp_cnt;
  
 +	char *circuitid;
 +	char *neid;
++	char *downstream;        // Downstream interface name from network config
 +
  	bool sta_bridge_mode;
  
