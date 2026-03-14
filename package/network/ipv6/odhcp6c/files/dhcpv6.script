@@ -83,6 +83,19 @@ setup_interface () {
 		proto_add_ipv6_address "$addr" "$mask" "$preferred" "$valid" 1
 		addrsig="$addrsig $addr/$mask"
 
+		# Only apply when MMW AP or STA configuration is set
+		local mmw_ap_config_set=$(uci -q get qcmap_lan.@global[0].mmwapconfigset 2>/dev/null || echo "0")
+		local mmw_sta_config_set=$(uci -q get qcmap_lan.@global[0].mmwstaconfigset 2>/dev/null || echo "0")
+		
+		logger -t dhcpv6 "MMW Route Debug: addr=$addr mask=$mask SERVER=$SERVER valid=$valid"
+		logger -t dhcpv6 "MMW Route Debug: mmw_ap_config_set=$mmw_ap_config_set mmw_sta_config_set=$mmw_sta_config_set"
+		
+		if [ "$mmw_ap_config_set" = "1" ] || [ "$mmw_sta_config_set" = "1" ]; then
+			logger -t dhcpv6 "MMW Route: MMW config detected, adding prefix route"
+			logger -t dhcpv6 "MMW Route: MMW config detected, addr:$addr device:$device"
+			ip -6 r add ${addr}/64 dev $device
+		fi
+
 		if [ -z "$RA_ADDRESSES" -a -z "$RA_ROUTES" -a \
 				-z "$RA_DNS" -a "$FAKE_ROUTES" = 1 ]; then
 			RA_ROUTES="::/0,$SERVER,$valid,4096"
