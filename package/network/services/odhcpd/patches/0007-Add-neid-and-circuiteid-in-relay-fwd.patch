@@ -1,16 +1,14 @@
-From d488a7e4ed6431c2b7f2be469f641427403ca6c1 Mon Sep 17 00:00:00 2001
+From 9c4b5d51a7b3318a45d5864f26d65e5e79d3a7b7 Mon Sep 17 00:00:00 2001
 From: Dheeraj Kumar <dhekum@qti.qualcomm.com>
-Date: Wed, 11 Mar 2026 12:11:20 +0530
-Subject: [PATCH] Add neid and circuiteid in relay fwd
-
-Signed-off-by: Dheeraj Kumar <dhekum@qti.qualcomm.com>
+Date: Fri, 10 Apr 2026 10:33:18 +0530
+Subject: [PATCH] Add-neid-and-circuiteid-in-relay-fwd
 
 ---
- src/config.c |  80 ++++++++++++++++++++++++++
- src/dhcpv6.c | 155 +++++++++++++++++++++++++++++++++++++++------------
+ src/config.c |  80 ++++++++++++++++++++++++++++
+ src/dhcpv6.c | 147 +++++++++++++++++++++++++++++++++++++++------------
  src/dhcpv6.h |   2 +
  src/odhcpd.h |   4 ++
- 4 files changed, 206 insertions(+), 35 deletions(-)
+ 4 files changed, 198 insertions(+), 35 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
 index 0818ee7..27a6284 100644
@@ -139,7 +137,7 @@ index 0818ee7..27a6284 100644
  		if (i->inuse) {
  			/* Resolve hybrid mode */
 diff --git a/src/dhcpv6.c b/src/dhcpv6.c
-index 6e127cd..028d711 100644
+index 6e127cd..6388476 100644
 --- a/src/dhcpv6.c
 +++ b/src/dhcpv6.c
 @@ -28,6 +28,8 @@
@@ -194,7 +192,7 @@ index 6e127cd..028d711 100644
  
  	if (h->msg_type == DHCPV6_MSG_RELAY_REPL ||
  	    h->msg_type == DHCPV6_MSG_RECONFIGURE ||
-@@ -813,47 +820,125 @@ static void relay_client_request(struct sockaddr_in6 *source,
+@@ -813,47 +820,117 @@ static void relay_client_request(struct sockaddr_in6 *source,
  
  	syslog(LOG_DEBUG, "Got a DHCPv6-request on %s", iface->name);
  
@@ -225,40 +223,19 @@ index 6e127cd..028d711 100644
 +
 +	opt_ptr = hdr->options;
 +
-+	/* 2. Construct Interface-ID option (18) */
-+	unsigned char if_id_buf[512];
-+	size_t if_id_len = 0;
-+	uint32_t ifindex_n = htonl(iface->ifindex);
-+
-+	if (opt_ptr + 4 + 4 > relay_buf_end) { /* 4 bytes for option header + 4 bytes for ifindex */
-+		syslog(LOG_ERR, "Buffer overflow: not enough space for Interface-ID");
-+		return;
-+	}
-+
-+	memcpy(&if_id_buf[if_id_len], &ifindex_n, 4);
-+	if_id_len += 4;
-+
-+	uint16_t opt18_type = htons(DHCPV6_OPT_INTERFACE_ID);
-+	uint16_t opt18_len = htons(if_id_len);
-+	memcpy(opt_ptr, &opt18_type, 2);
-+	opt_ptr += 2;
-+	memcpy(opt_ptr, &opt18_len, 2);
-+	opt_ptr += 2;
-+	memcpy(opt_ptr, if_id_buf, if_id_len);
-+	opt_ptr += if_id_len;
-+
++	/* 2. Construct Interface-ID option (18) with Circuit ID */
 +	if (iface->circuitid) {
 +		size_t l = strlen(iface->circuitid);
 +		if (l > MAX_OPTION_STRING_LEN) {
 +			syslog(LOG_WARNING, "Circuit-ID too long (%zu bytes), truncating to %d", l, MAX_OPTION_STRING_LEN);
 +			l = MAX_OPTION_STRING_LEN;
-+    	}
++		}
 +		if (opt_ptr + 4 + l > relay_buf_end) {
-+			syslog(LOG_ERR, "Buffer overflow: not enough space for Circuit-ID");
++			syslog(LOG_ERR, "Buffer overflow: not enough space for Circuit-ID in Interface-ID");
 +			return;
 +		}
- 
-+		uint16_t type = htons(DHCPV6_OPT_REMOTE_ID);
++
++		uint16_t type = htons(DHCPV6_OPT_INTERFACE_ID);
 +		uint16_t length = htons(l);
 +		memcpy(opt_ptr, &type, 2);
 +		opt_ptr += 2;
@@ -268,24 +245,37 @@ index 6e127cd..028d711 100644
 +		opt_ptr += l;
 +	}
 +
++	/* 3. Add Remote-ID option (37) with NEID (RFC 4649 format: Enterprise-Number + Remote-ID) */
 +	if (iface->neid) {
 +		size_t l = strlen(iface->neid);
++		if (l < 4) {
++			syslog(LOG_ERR, "NEID too short (%zu bytes), need at least 4 bytes for Enterprise-Number", l);
++			return;
++		}
++		if (l > MAX_OPTION_STRING_LEN) {
++			syslog(LOG_WARNING, "NEID too long (%zu bytes), truncating to %d", l, MAX_OPTION_STRING_LEN);
++			l = MAX_OPTION_STRING_LEN;
++		}
 +		if (opt_ptr + 4 + l > relay_buf_end) {
-+			syslog(LOG_ERR, "Buffer overflow: not enough space for NEID");
++			syslog(LOG_ERR, "Buffer overflow: not enough space for NEID in Remote-ID");
 +			return;
 +		}
 +
-+		uint16_t type = htons(DHCPV6_OPT_SUBSCRIBER_ID);
++		uint16_t type = htons(DHCPV6_OPT_REMOTE_ID);
 +		uint16_t length = htons(l);
 +		memcpy(opt_ptr, &type, 2);
 +		opt_ptr += 2;
 +		memcpy(opt_ptr, &length, 2);
 +		opt_ptr += 2;
-+		memcpy(opt_ptr, iface->neid, l);
-+		opt_ptr += l;
++		
++		/* RFC 4649: First 4 bytes = Enterprise-Number, rest = Remote-ID */
++		memcpy(opt_ptr, iface->neid, 4);  /* Enterprise-Number (4 bytes) */
++		opt_ptr += 4;
++		memcpy(opt_ptr, iface->neid + 4, l - 4);  /* Remote-ID (remaining bytes) */
++		opt_ptr += (l - 4);
 +	}
 +
-+	/* 3. Add Relay-Msg option (9) */
++	/* 4. Add Relay-Msg option (9) */
 +	if (opt_ptr + 4 + len > relay_buf_end) {
 +		syslog(LOG_ERR, "Buffer overflow: not enough space for relayed message");
 +		return;
@@ -300,9 +290,9 @@ index 6e127cd..028d711 100644
 +	memcpy(opt_ptr, data, len);
 +	opt_ptr += len;
 +
-+	/* 4. Send the message */
++	/* 5. Send the message */
 +	relay_len = opt_ptr - relay_buf;
-+
+ 
 +	struct iovec iov = {relay_buf, relay_len};
 +	struct interface *c;
 +	struct sockaddr_in6 s;
