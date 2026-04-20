@@ -1,14 +1,14 @@
-From 9c4b5d51a7b3318a45d5864f26d65e5e79d3a7b7 Mon Sep 17 00:00:00 2001
+From c010912f09ff8652c4a5461f7264b6ba3dadffca Mon Sep 17 00:00:00 2001
 From: Dheeraj Kumar <dhekum@qti.qualcomm.com>
-Date: Fri, 10 Apr 2026 10:33:18 +0530
-Subject: [PATCH] Add-neid-and-circuiteid-in-relay-fwd
+Date: Mon, 20 Apr 2026 11:07:21 +0530
+Subject: [PATCH] Add neid and circuiteid in relay fwd
 
 ---
- src/config.c |  80 ++++++++++++++++++++++++++++
- src/dhcpv6.c | 147 +++++++++++++++++++++++++++++++++++++++------------
+ src/config.c |  80 ++++++++++++++++++++++
+ src/dhcpv6.c | 189 ++++++++++++++++++++++++++++++++++++++++-----------
  src/dhcpv6.h |   2 +
  src/odhcpd.h |   4 ++
- 4 files changed, 198 insertions(+), 35 deletions(-)
+ 4 files changed, 234 insertions(+), 41 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
 index 0818ee7..27a6284 100644
@@ -137,7 +137,7 @@ index 0818ee7..27a6284 100644
  		if (i->inuse) {
  			/* Resolve hybrid mode */
 diff --git a/src/dhcpv6.c b/src/dhcpv6.c
-index 6e127cd..6388476 100644
+index 6e127cd..fdc4728 100644
 --- a/src/dhcpv6.c
 +++ b/src/dhcpv6.c
 @@ -28,6 +28,8 @@
@@ -149,7 +149,64 @@ index 6e127cd..6388476 100644
  
  static void relay_client_request(struct sockaddr_in6 *source,
  		const void *data, size_t len, struct interface *iface);
-@@ -786,24 +788,29 @@ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
+@@ -668,10 +670,22 @@ static void handle_dhcpv6(void *addr, void *data, size_t len,
+ 	if (iface->dhcpv6 == MODE_SERVER) {
+ 		handle_client_request(addr, data, len, iface, dest_addr);
+ 	} else if (iface->dhcpv6 == MODE_RELAY) {
+-		if (iface->master)
++		if (iface->master) {
+ 			relay_server_response(data, len);
+-		else
+-			relay_client_request(addr, data, len, iface);
++		} else {
++			/* When eth0.1037.1015 (master) is a bridge member of br-lan1015
++			 * (slave), the relay-reply from the server arrives on eth0.1037.1015
++			 * and is ALSO seen on br-lan1015 via bridge forwarding.
++			 * odhcpd receives it on the slave socket (br-lan1015).
++			 * If the message is RELAY_REPL, treat it as a server response:
++			 * decapsulate the relay header and send the plain DHCPv6 message
++			 * (Advertise/Reply/etc.) to the client via br-lan1015 → mld0.sta1.1015. */
++			struct dhcpv6_relay_header *h = data;
++			if (len >= sizeof(*h) && h->msg_type == DHCPV6_MSG_RELAY_REPL)
++				relay_server_response(data, len);
++			else
++				relay_client_request(addr, data, len, iface);
++		}
+ 	}
+ }
+ 
+@@ -699,9 +713,27 @@ static void relay_server_response(uint8_t *data, size_t len)
+ 
+ 	/* Go through options and find what we need */
+ 	dhcpv6_for_each_option(h->options, end, otype, olen, odata) {
+-		if (otype == DHCPV6_OPT_INTERFACE_ID
+-				&& olen == sizeof(ifaceidx)) {
+-			memcpy(&ifaceidx, odata, sizeof(ifaceidx));
++		if (otype == DHCPV6_OPT_INTERFACE_ID) {
++			if (olen == sizeof(ifaceidx)) {
++				/* Standard: 4-byte interface index */
++				memcpy(&ifaceidx, odata, sizeof(ifaceidx));
++			} else {
++				/* Custom: circuit-id string in Interface-ID.
++				 * relay_client_request puts the circuit-id string here
++				 * for RFC 3315 compliance. Find the downstream interface
++				 * by matching its configured circuitid.
++				 * This restores the DL path for ALL relay reply types
++				 * (Advertise, Reply, Reconfigure, nested relay-reply). */
++				struct interface *c;
++				avl_for_each_element(&interfaces, c, avl) {
++					if (c->circuitid &&
++					    strlen(c->circuitid) == (size_t)olen &&
++					    memcmp(c->circuitid, odata, (size_t)olen) == 0) {
++						ifaceidx = c->ifindex;
++						break;
++					}
++				}
++			}
+ 		} else if (otype == DHCPV6_OPT_RELAY_MSG) {
+ 			payload_data = odata;
+ 			payload_len = olen;
+@@ -786,24 +818,29 @@ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
  	return addr;
  }
  
@@ -192,7 +249,7 @@ index 6e127cd..6388476 100644
  
  	if (h->msg_type == DHCPV6_MSG_RELAY_REPL ||
  	    h->msg_type == DHCPV6_MSG_RECONFIGURE ||
-@@ -813,47 +820,117 @@ static void relay_client_request(struct sockaddr_in6 *source,
+@@ -813,47 +850,117 @@ static void relay_client_request(struct sockaddr_in6 *source,
  
  	syslog(LOG_DEBUG, "Got a DHCPv6-request on %s", iface->name);
  
@@ -244,7 +301,7 @@ index 6e127cd..6388476 100644
 +		memcpy(opt_ptr, iface->circuitid, l);
 +		opt_ptr += l;
 +	}
-+
+ 
 +	/* 3. Add Remote-ID option (37) with NEID (RFC 4649 format: Enterprise-Number + Remote-ID) */
 +	if (iface->neid) {
 +		size_t l = strlen(iface->neid);
@@ -292,7 +349,7 @@ index 6e127cd..6388476 100644
 +
 +	/* 5. Send the message */
 +	relay_len = opt_ptr - relay_buf;
- 
++
 +	struct iovec iov = {relay_buf, relay_len};
 +	struct interface *c;
 +	struct sockaddr_in6 s;
