@@ -1,0 +1,49 @@
+From 01fcc898496cf832d1c3b7e8227cd7630dad6524 Mon Sep 17 00:00:00 2001
+From: upalivel <upalivel@qti.qualcomm.com>
+Date: Thu, 30 Apr 2026 12:57:32 +0530
+
+Subject: [PATCH] sdx85: procd: increase default fd limits  - Set RLIMIT_NOFILE
+ on procd (pid=1) at startup so all child processes  - inherit higher fd
+ limits (soft=4096, hard=524288) instead of kernel    defaults (soft=1024,
+ hard=4096 from INR_OPEN_CUR/INR_OPEN_MAX). 
+ 
+ Signed-off-by: Umesh <upalivel@qti.qualcomm.com>"
+---
+ procd.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/procd.c b/procd.c
+index 1223283..bfd3ab6 100644
+--- a/procd.c
++++ b/procd.c
+@@ -16,6 +16,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sys/reboot.h>
++#include <sys/resource.h>
+ 
+ #include <unistd.h>
+ #include <getopt.h>
+@@ -121,6 +122,19 @@ int main(int argc, char **argv)
+ 	ulog_threshold(LOG_DEBUG + 1);
+ 
+ 	setsid();
++	// FDLIMIT_CHANGE
++	{
++		struct rlimit rlim;
++		rlim.rlim_cur = 4096;
++		rlim.rlim_max = 524288;
++		if (setrlimit(RLIMIT_NOFILE, &rlim) < 0)
++			ERROR("Failed to set RLIMIT_NOFILE: %m\n");
++		else
++			DEBUG(2, "Set RLIMIT_NOFILE: soft=%lu hard=%lu\n",
++					(unsigned long)rlim.rlim_cur,
++					(unsigned long)rlim.rlim_max);
++	}
++
+ 	uloop_init();
+ 	procd_signal();
+ 	procd_udebug_set_enabled(true);
+-- 
+2.34.1
+
