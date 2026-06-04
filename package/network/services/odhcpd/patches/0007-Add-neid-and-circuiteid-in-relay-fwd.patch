@@ -1,38 +1,40 @@
-From c010912f09ff8652c4a5461f7264b6ba3dadffca Mon Sep 17 00:00:00 2001
+From 49c955be387b85f033fd0f3f98292f863d866c69 Mon Sep 17 00:00:00 2001
 From: Dheeraj Kumar <dhekum@qti.qualcomm.com>
-Date: Mon, 20 Apr 2026 11:07:21 +0530
+Date: Thu, 14 May 2026 16:36:54 +0530
 Subject: [PATCH] Add neid and circuiteid in relay fwd
 
 ---
- src/config.c |  80 ++++++++++++++++++++++
- src/dhcpv6.c | 189 ++++++++++++++++++++++++++++++++++++++++-----------
+ src/config.c |  85 ++++++++++++++++++
+ src/dhcpv6.c | 241 ++++++++++++++++++++++++++++++++++++++++++---------
  src/dhcpv6.h |   2 +
- src/odhcpd.h |   4 ++
- 4 files changed, 234 insertions(+), 41 deletions(-)
+ src/odhcpd.h |   9 ++
+ 4 files changed, 296 insertions(+), 41 deletions(-)
 
 diff --git a/src/config.c b/src/config.c
-index 0818ee7..27a6284 100644
+index 0818ee7..986f1d6 100644
 --- a/src/config.c
 +++ b/src/config.c
-@@ -95,6 +95,8 @@ enum {
+@@ -95,6 +95,9 @@ enum {
  	IFACE_ATTR_NTP,
  	IFACE_ATTR_STA_BRIDGE_MODE,
  	IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE,
 +	IFACE_ATTR_CIRCUITID,
 +	IFACE_ATTR_NEID,
++	IFACE_ATTR_RELAY_PASSTHROUGH,
  	IFACE_ATTR_MAX
  };
  
-@@ -150,6 +152,8 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
+@@ -150,6 +153,9 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
  	[IFACE_ATTR_NTP] = { .name = "ntp", .type = BLOBMSG_TYPE_ARRAY },
  	[IFACE_ATTR_STA_BRIDGE_MODE] = { .name = "sta_bridge_mode", .type = BLOBMSG_TYPE_BOOL },
  	[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE] = { .name = "qcmap_prefix_delegation_mode", .type = BLOBMSG_TYPE_INT32 },
 +	[IFACE_ATTR_CIRCUITID] = { .name = "circuitid", .type = BLOBMSG_TYPE_STRING },
 +	[IFACE_ATTR_NEID] = { .name = "neid", .type = BLOBMSG_TYPE_STRING },
++	[IFACE_ATTR_RELAY_PASSTHROUGH] = { .name = "relay_passthrough", .type = BLOBMSG_TYPE_BOOL },
  };
  
  static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
-@@ -212,6 +216,41 @@ static const struct { const char *name; uint8_t flag; } ra_flags[] = {
+@@ -212,6 +218,41 @@ static const struct { const char *name; uint8_t flag; } ra_flags[] = {
  	{ .name = NULL, },
  };
  
@@ -74,7 +76,7 @@ index 0818ee7..27a6284 100644
  static void set_interface_defaults(struct interface *iface)
  {
  	iface->ignore = true;
-@@ -250,6 +289,12 @@ static void clean_interface(struct interface *iface)
+@@ -250,6 +291,12 @@ static void clean_interface(struct interface *iface)
  	free(iface->dhcpv4_ntp);
  	free(iface->dhcpv6_ntp);
  	free(iface->dhcpv6_sntp);
@@ -87,7 +89,7 @@ index 0818ee7..27a6284 100644
  	memset(&iface->ra, 0, sizeof(*iface) - offsetof(struct interface, ra));
  	set_interface_defaults(iface);
  }
-@@ -1109,6 +1154,28 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
+@@ -1109,6 +1156,31 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
  	if ((c = tb[IFACE_ATTR_QCMAP_PREFIX_DELEGATION_MODE]))
  		iface->qcmap_prefix_delegation_mode = blobmsg_get_u32(c);
  
@@ -113,10 +115,13 @@ index 0818ee7..27a6284 100644
 +		iface->neid = new_neid;
 +	}
 +
++	if ((c = tb[IFACE_ATTR_RELAY_PASSTHROUGH]))
++		iface->relay_passthrough = blobmsg_get_bool(c);
++
  	return 0;
  
  err:
-@@ -1400,6 +1467,19 @@ void odhcpd_reload(void)
+@@ -1400,6 +1472,19 @@ void odhcpd_reload(void)
  	}
  
  
@@ -137,10 +142,10 @@ index 0818ee7..27a6284 100644
  		if (i->inuse) {
  			/* Resolve hybrid mode */
 diff --git a/src/dhcpv6.c b/src/dhcpv6.c
-index 6e127cd..fdc4728 100644
+index 6e127cd..0f61eac 100644
 --- a/src/dhcpv6.c
 +++ b/src/dhcpv6.c
-@@ -28,6 +28,8 @@
+@@ -28,10 +28,14 @@
  #ifdef DHCPV4_SUPPORT
  #include "dhcpv4.h"
  #endif
@@ -149,7 +154,13 @@ index 6e127cd..fdc4728 100644
  
  static void relay_client_request(struct sockaddr_in6 *source,
  		const void *data, size_t len, struct interface *iface);
-@@ -668,10 +670,22 @@ static void handle_dhcpv6(void *addr, void *data, size_t len,
+ static void relay_server_response(uint8_t *data, size_t len);
++static void relay_passthrough_forward(const void *data, size_t len,
++		struct interface *iface);
+ 
+ static void handle_dhcpv6(void *addr, void *data, size_t len,
+ 		struct interface *iface, void *dest);
+@@ -668,10 +672,32 @@ static void handle_dhcpv6(void *addr, void *data, size_t len,
  	if (iface->dhcpv6 == MODE_SERVER) {
  		handle_client_request(addr, data, len, iface, dest_addr);
  	} else if (iface->dhcpv6 == MODE_RELAY) {
@@ -167,15 +178,25 @@ index 6e127cd..fdc4728 100644
 +			 * decapsulate the relay header and send the plain DHCPv6 message
 +			 * (Advertise/Reply/etc.) to the client via br-lan1015 → mld0.sta1.1015. */
 +			struct dhcpv6_relay_header *h = data;
-+			if (len >= sizeof(*h) && h->msg_type == DHCPV6_MSG_RELAY_REPL)
++			if (len >= sizeof(*h) && h->msg_type == DHCPV6_MSG_RELAY_REPL) {
 +				relay_server_response(data, len);
-+			else
++			} else if (iface->relay_passthrough &&
++				   len >= sizeof(*h) &&
++				   h->msg_type == DHCPV6_MSG_RELAY_FORW) {
++				/* Cascade AP relay passthrough:
++				 * Packet is already a RELAY_FORW (sent by AP2 for STA2).
++				 * Forward it directly to the master without adding another
++				 * relay header. AP2's NEID and Circuit-ID are preserved.
++				 * Flow: STA2 -> AP2 -> [eth1.1037.1015/br-lan1015] -> AP1 -> Server */
++				relay_passthrough_forward(data, len, iface);
++			} else {
 +				relay_client_request(addr, data, len, iface);
++			}
 +		}
  	}
  }
  
-@@ -699,9 +713,27 @@ static void relay_server_response(uint8_t *data, size_t len)
+@@ -699,9 +725,27 @@ static void relay_server_response(uint8_t *data, size_t len)
  
  	/* Go through options and find what we need */
  	dhcpv6_for_each_option(h->options, end, otype, olen, odata) {
@@ -206,7 +227,54 @@ index 6e127cd..fdc4728 100644
  		} else if (otype == DHCPV6_OPT_RELAY_MSG) {
  			payload_data = odata;
  			payload_len = olen;
-@@ -786,24 +818,29 @@ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
+@@ -765,6 +809,46 @@ static void relay_server_response(uint8_t *data, size_t len)
+ 	odhcpd_send(iface->dhcpv6_event.uloop.fd, &target, &iov, 1, iface);
+ }
+ 
++/* Forward an already-relayed RELAY_FORW packet directly to the master relay
++ * interface without adding another relay header.
++ *
++ * Used in cascade AP topology where eth1.1037.1015 (bridge member of br-lan1015)
++ * receives a RELAY_FORW from AP2. AP1 must not re-encapsulate it — just forward
++ * it as-is to eth0.1037.1015 (the master) so the server sees AP2's relay info.
++ *
++ * Triggered when iface->relay_passthrough == true and msg_type == RELAY_FORW.
++ */
++static void relay_passthrough_forward(const void *data, size_t len,
++		struct interface *iface)
++{
++	struct iovec iov = {(void *)data, len};
++	struct interface *c;
++	struct sockaddr_in6 s;
++	bool forwarded = false;
++
++	memset(&s, 0, sizeof(s));
++	s.sin6_family = AF_INET6;
++	s.sin6_port = htons(DHCPV6_SERVER_PORT);
++	inet_pton(AF_INET6, ALL_DHCPV6_SERVERS, &s.sin6_addr);
++
++	/* Find master relay interface(s) and forward the packet as-is */
++	avl_for_each_element(&interfaces, c, avl) {
++		if (!c->master || c->dhcpv6 != MODE_RELAY)
++			continue;
++
++		syslog(LOG_DEBUG,
++		       "Passthrough relay: forwarding RELAY_FORW from %s directly to master %s",
++		       iface->name, c->name);
++		odhcpd_send(c->dhcpv6_event.uloop.fd, &s, &iov, 1, c);
++		forwarded = true;
++	}
++
++	if (!forwarded)
++		syslog(LOG_WARNING,
++		       "Passthrough relay: no master relay interface found for %s",
++		       iface->name);
++}
++
+ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
+ {
+ 	struct odhcpd_ipaddr *addr = NULL;
+@@ -786,24 +870,29 @@ static struct odhcpd_ipaddr *relay_link_address(struct interface *iface)
  	return addr;
  }
  
@@ -249,7 +317,7 @@ index 6e127cd..fdc4728 100644
  
  	if (h->msg_type == DHCPV6_MSG_RELAY_REPL ||
  	    h->msg_type == DHCPV6_MSG_RECONFIGURE ||
-@@ -813,47 +850,117 @@ static void relay_client_request(struct sockaddr_in6 *source,
+@@ -813,47 +902,117 @@ static void relay_client_request(struct sockaddr_in6 *source,
  
  	syslog(LOG_DEBUG, "Got a DHCPv6-request on %s", iface->name);
  
@@ -403,10 +471,10 @@ index b925928..81cdddd 100644
  #define DHCPV6_OPT_NTP_SERVERS 56
  #define DHCPV6_OPT_SOL_MAX_RT 82
 diff --git a/src/odhcpd.h b/src/odhcpd.h
-index 6eb1526..c336c19 100644
+index 6eb1526..ca92c11 100644
 --- a/src/odhcpd.h
 +++ b/src/odhcpd.h
-@@ -395,6 +395,10 @@ struct interface {
+@@ -395,7 +395,16 @@ struct interface {
  	struct in6_addr *dhcpv6_sntp;
  	size_t dhcpv6_sntp_cnt;
  
@@ -415,8 +483,14 @@ index 6eb1526..c336c19 100644
 +	char *downstream;        // Downstream interface name from network config
 +
  	bool sta_bridge_mode;
++	bool relay_passthrough;  /* When true, incoming RELAY_FORW packets are forwarded
++	                          * directly to the master relay interface without adding
++	                          * an additional relay header. Used when this interface
++	                          * receives already-relayed packets from another AP.
++	                          * Flow: STA2 -> AP2 -> [eth1.1037.1015] -> AP1 -> Server */
  
  	// Legacy Prefix Delegation,
+ 	// 1: Legacy Prefix Delegation, use RS/RA for prefix delegation
 -- 
 2.34.1
 
